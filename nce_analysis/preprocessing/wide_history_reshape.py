@@ -4,7 +4,7 @@ from collections import defaultdict
 
 import pandas as pd
 
-from nce_analysis.preprocessing.base import PreprocessingError
+from nce_analysis.preprocessing.base import PreprocessingError, PreprocessingStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -53,3 +53,30 @@ def explode_measurement_points(raw_df: pd.DataFrame) -> pd.DataFrame:
         [exploded.drop(columns=["Measurement_Points"]).reset_index(drop=True), points],
         axis=1,
     )
+
+
+class WideHistoryReshape(PreprocessingStrategy):
+    def transform(self, raw_df: pd.DataFrame) -> pd.DataFrame:
+        levels = discover_history_levels(raw_df.columns)
+        if not levels:
+            raise PreprocessingError(
+                "No Pre_<Field>_<N> history columns found in input data; "
+                "expected at least one upstream history level."
+            )
+
+        exploded = explode_measurement_points(raw_df)
+        base_columns = [
+            c for c in exploded.columns if not _HISTORY_COLUMN_PATTERN.match(c)
+        ]
+
+        level_frames = []
+        for field_map in levels.values():
+            level_df = exploded[base_columns].copy()
+            for field_name in HISTORY_FIELD_NAMES:
+                source_col = field_map.get(field_name)
+                canonical_col = f"Pre_{field_name}"
+                level_df[canonical_col] = exploded[source_col] if source_col else pd.NA
+            level_df = level_df[level_df["Pre_StageID"].notna()]
+            level_frames.append(level_df)
+
+        return pd.concat(level_frames, ignore_index=True)
