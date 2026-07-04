@@ -4,18 +4,21 @@
 
 **Goal:** Build a pure-Python library that analyzes LITHO NCE measurement hotspots and traces them back to the upstream (CMP/CVD/PVD) tool+chamber most likely responsible, filtering out anomalies actually caused by the LITHO tool/chuck itself.
 
-**Architecture:** A pipeline of swappable strategy components (Preprocessing → Hotspot Detection → Noise Filter → Root Cause Analysis → Drift Analysis → Result Aggregation), each stage implementing a common ABC interface and selected at runtime via a single `AnalysisConfig`. Per-upstream-stage-type grouping (CMP/CVD/PVD analyzed independently) is done by grouping on the actual `Pre_StageID` value discovered during preprocessing, not by positional column suffix.
+**Architecture:** A pipeline of swappable strategy components (Preprocessing → Hotspot Detection → Noise Filter → Root Cause Analysis → Drift Analysis → Result Aggregation), each stage implementing a common ABC interface and selected at runtime via a single `AnalysisConfig`. Per-upstream-step grouping is done by grouping on the actual `(Pre_StageID, Pre_StepID)` combination discovered during preprocessing, not by positional column suffix — repeated passes through the same stage type (StepIDs like `3580.01` vs `3580.02`) are analyzed as separate groups, so each wafer appears exactly once per group.
 
-**Tech Stack:** Python 3.11+, pandas, pydantic v2, scipy (chi-square/Fisher/linregress/pearsonr), scikit-learn (DecisionTreeClassifier), shap, xgboost (dependency reserved for future strategy use), pytest.
+**Tech Stack:** Python 3.11+, pandas, pydantic v2, scipy (chi-square/Fisher/linregress/pearsonr), scikit-learn (DecisionTreeClassifier), shap, pytest. (XGBoost is a future strategy variant — deliberately not a v1 dependency.)
 
 ## Global Constraints
 
 - Pure Python library — no REST/API layer (per spec §1).
 - Input scale: hundreds to low-thousands of wafers per call (per spec §1) — no need to optimize for millions of rows.
 - `X_Posi`/`Y_Posi` are already on a fixed 6mm grid, directly comparable across wafers — no spatial tolerance/binning logic (per spec §2).
-- History levels `Pre_*_1..N` have variable, per-dataset `N`; the positional suffix does **not** determine stage type — grouping must use the actual `Pre_StageID` value (per spec §2, §4).
-- Default config values (per spec §10): `spec_threshold=15.0`, `min_wafer_count=5`, `hotspot_ratio_threshold=0.05`, `noise_filter_majority_threshold=0.5`, `root_cause_strategy="both"`, `drift_strategy="regression_cusum"`, `alpha=0.05`.
+- History levels `Pre_*_1..N` have variable, per-dataset `N`; the positional suffix does **not** determine stage type — root-cause grouping must use the actual `(Pre_StageID, Pre_StepID)` combination (per spec §2, §3, §4). A wafer may pass the same stage type more than once; `StepID` distinguishes the passes via its decimal suffix (e.g. `3580.01`, `3580.02`), so neither pass's tool/chamber record may be dropped.
+- Residual duplicates within one `(WaferID, Pre_StageID, Pre_StepID)` group (rework/data duplication) keep the most recent `Pre_Execute_Time` record and log a warning (per spec §11).
+- Default config values (per spec §10): `spec_threshold=15.0`, `min_wafer_count=5`, `hotspot_ratio_threshold=0.05`, `noise_filter_majority_threshold=0.5`, `root_cause_strategy="both"`, `drift_strategy="regression_cusum"`, `alpha=0.05`, `summary_top_n=5`.
 - `PreprocessingError` must be raised (not silently swallowed) when no `Pre_*_i` columns are found (per spec §11).
+- Wafers with an empty `Measurement_Points` list are skipped with a logged warning; an all-empty batch raises `PreprocessingError` (per spec §11).
+- Hotspots below `min_wafer_count` are never given a confidence score — they are reported raw in `AnalysisResult.Insufficient_Sample_Hotspots` (per spec §5, §11).
 - `PRODUCT_TOOL_MISMATCH` / `PartID` dimension is explicitly out of scope for v1 (per spec §9) — do not add it.
 - Validate only at system boundaries; trust internal data once past them (per spec §11).
 
@@ -47,7 +50,6 @@ dependencies = [
     "pydantic>=2.0",
     "scipy>=1.10",
     "scikit-learn>=1.3",
-    "xgboost>=2.0",
     "shap>=0.44",
     "numpy>=1.24",
 ]
@@ -113,7 +115,7 @@ def test_config_rejects_invalid_drift_strategy():
 
 Run:
 ```bash
-cd /mnt/c/Users/y4lin/gemini-repo/nce_analysis_service
+cd /mnt/c/Users/y4lin/gemini_repo/nce_analysis_service
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
@@ -163,7 +165,7 @@ git commit -m "feat: add project scaffolding and AnalysisConfig"
 
 **Interfaces:**
 - Consumes: `AnalysisConfig` from `nce_analysis.config`
-- Produces: `RootCauseDetail` (pydantic model), `AnalysisResult` (pydantic model), `RootCauseType` (Literal alias). Used by `result.py` and `pipeline.py` in later tasks.
+- Produces: `RootCauseDetail` (pydantic model), `InsufficientSampleHotspot` (pydantic model), `AnalysisResult` (pydantic model), `RootCauseType` (Literal alias). Used by `result.py` and `pipeline.py` in later tasks.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -182,6 +184,7 @@ def _detail(**overrides):
     defaults = dict(
         Suspect_Pre_ToolID="CMP_01",
         Suspect_Pre_ChamberID="ChamberA",
+        Suspect_Pre_StepID="3580.01",
         Confidence_Score=92.5,
         Root_Cause_Type="SPECIFIC_CHAMBER_DEFECT",
         Affected_Coordinates=[(0.0, 0.0)],
@@ -211,6 +214,7 @@ def test_analysis_result_construction():
     )
     assert result.Summary[0].Suspect_Pre_ToolID == "CMP_01"
     assert result.Config_Used.spec_threshold == 15.0
+    assert result.Insufficient_Sample_Hotspots == []
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -239,15 +243,18 @@ RootCauseType = Literal[
 ]
 
 
-class MeasurementPoint(BaseModel):
+class InsufficientSampleHotspot(BaseModel):
     X_Posi: float
     Y_Posi: float
-    NCE_Value: float
+    anomaly_ratio: float
+    anomalous_wafer_count: int
+    total_wafer_count: int
 
 
 class RootCauseDetail(BaseModel):
     Suspect_Pre_ToolID: str
     Suspect_Pre_ChamberID: str
+    Suspect_Pre_StepID: str
     Confidence_Score: float
     Root_Cause_Type: RootCauseType
     Affected_Coordinates: list[tuple[float, float]]
@@ -258,6 +265,7 @@ class RootCauseDetail(BaseModel):
 class AnalysisResult(BaseModel):
     Summary: list[RootCauseDetail]
     Details: list[RootCauseDetail]
+    Insufficient_Sample_Hotspots: list[InsufficientSampleHotspot] = []
     Generated_At: datetime
     Config_Used: AnalysisConfig
 ```
@@ -366,15 +374,17 @@ git commit -m "feat: add PreprocessingStrategy interface and PreprocessingError"
 - Test: `tests/test_wide_history_reshape.py`
 
 **Interfaces:**
-- Consumes: none (pure pandas transform)
-- Produces: `explode_measurement_points(raw_df: pd.DataFrame) -> pd.DataFrame` — module-level function. Used internally by `WideHistoryReshape.transform` (Task 6).
+- Consumes: `PreprocessingError` from `nce_analysis.preprocessing.base` (Task 3)
+- Produces: `explode_measurement_points(raw_df: pd.DataFrame) -> pd.DataFrame` — module-level function. Skips wafers with empty `Measurement_Points` (logged warning); raises `PreprocessingError` if every wafer is empty. Used internally by `WideHistoryReshape.transform` (Task 6).
 
 - [ ] **Step 1: Write the failing test**
 
 `tests/test_wide_history_reshape.py`:
 ```python
 import pandas as pd
+import pytest
 
+from nce_analysis.preprocessing.base import PreprocessingError
 from nce_analysis.preprocessing.wide_history_reshape import explode_measurement_points
 
 
@@ -405,6 +415,32 @@ def test_explode_measurement_points_expands_rows():
     assert set(result.columns) == {"WaferID", "ToolID", "X_Posi", "Y_Posi", "NCE_Value"}
     assert result.loc[result["WaferID"] == "W2", "NCE_Value"].iloc[0] == 5.0
     assert (result["WaferID"] == "W1").sum() == 2
+
+
+def test_explode_skips_wafers_with_empty_measurement_points(caplog):
+    raw_df = pd.DataFrame(
+        [
+            {
+                "WaferID": "W1",
+                "ToolID": "LITHO_01",
+                "Measurement_Points": [{"X_Posi": 0.0, "Y_Posi": 0.0, "NCE_Value": 10.0}],
+            },
+            {"WaferID": "W2", "ToolID": "LITHO_02", "Measurement_Points": []},
+        ]
+    )
+
+    with caplog.at_level("WARNING"):
+        result = explode_measurement_points(raw_df)
+
+    assert result["WaferID"].tolist() == ["W1"]
+    assert "W2" in caplog.text
+
+
+def test_explode_raises_when_all_wafers_have_empty_measurement_points():
+    raw_df = pd.DataFrame([{"WaferID": "W1", "Measurement_Points": []}])
+
+    with pytest.raises(PreprocessingError):
+        explode_measurement_points(raw_df)
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -416,13 +452,37 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'nce_analysis.preproce
 
 `nce_analysis/preprocessing/wide_history_reshape.py`:
 ```python
+import logging
+
 import pandas as pd
+
+from nce_analysis.preprocessing.base import PreprocessingError
+
+logger = logging.getLogger(__name__)
 
 
 def explode_measurement_points(raw_df: pd.DataFrame) -> pd.DataFrame:
     """Explode the Measurement_Points column (list[dict] per row) into one row
-    per (X_Posi, Y_Posi, NCE_Value), carrying every other column along."""
-    exploded = raw_df.explode("Measurement_Points", ignore_index=True)
+    per (X_Posi, Y_Posi, NCE_Value), carrying every other column along.
+    Wafers with an empty/missing Measurement_Points list are skipped with a
+    logged warning; if every wafer is empty, raise PreprocessingError."""
+    has_points = raw_df["Measurement_Points"].map(
+        lambda points: isinstance(points, list) and len(points) > 0
+    )
+    if not has_points.all():
+        skipped = raw_df.loc[~has_points, "WaferID"].tolist()
+        logger.warning(
+            "Skipping %d wafer(s) with empty Measurement_Points: %s",
+            len(skipped),
+            skipped,
+        )
+    if not has_points.any():
+        raise PreprocessingError(
+            "Every wafer in the batch has an empty Measurement_Points list; "
+            "nothing to analyze."
+        )
+    kept = raw_df[has_points]
+    exploded = kept.explode("Measurement_Points", ignore_index=True)
     points = pd.json_normalize(exploded["Measurement_Points"].tolist())
     return pd.concat(
         [exploded.drop(columns=["Measurement_Points"]).reset_index(drop=True), points],
@@ -433,7 +493,7 @@ def explode_measurement_points(raw_df: pd.DataFrame) -> pd.DataFrame:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `pytest tests/test_wide_history_reshape.py -v`
-Expected: PASS (1 test)
+Expected: PASS (3 tests)
 
 - [ ] **Step 5: Commit**
 
@@ -525,7 +585,7 @@ def discover_history_levels(columns) -> dict[int, dict[str, str]]:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `pytest tests/test_wide_history_reshape.py -v`
-Expected: PASS (3 tests)
+Expected: PASS (5 tests)
 
 - [ ] **Step 5: Commit**
 
@@ -550,9 +610,6 @@ git commit -m "feat: add discover_history_levels helper"
 
 Append to `tests/test_wide_history_reshape.py`:
 ```python
-import pytest
-
-from nce_analysis.preprocessing.base import PreprocessingError
 from nce_analysis.preprocessing.wide_history_reshape import WideHistoryReshape
 
 
@@ -632,9 +689,9 @@ Expected: FAIL with `ImportError: cannot import name 'WideHistoryReshape'`
 
 - [ ] **Step 3: Write minimal implementation**
 
-Add to `nce_analysis/preprocessing/wide_history_reshape.py`:
+Add to `nce_analysis/preprocessing/wide_history_reshape.py` (`PreprocessingError` and `pytest` are already imported at the top of the module/test file from Task 4):
 ```python
-from nce_analysis.preprocessing.base import PreprocessingError, PreprocessingStrategy
+from nce_analysis.preprocessing.base import PreprocessingStrategy
 
 
 class WideHistoryReshape(PreprocessingStrategy):
@@ -667,7 +724,7 @@ class WideHistoryReshape(PreprocessingStrategy):
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `pytest tests/test_wide_history_reshape.py -v`
-Expected: PASS (6 tests total in this file)
+Expected: PASS (8 tests total in this file)
 
 - [ ] **Step 5: Commit**
 
@@ -687,7 +744,7 @@ git commit -m "feat: implement WideHistoryReshape preprocessing strategy"
 
 **Interfaces:**
 - Consumes: `AnalysisConfig` from `nce_analysis.config`
-- Produces: `HotspotStrategy` (ABC with abstract `detect(long_df: pd.DataFrame, config: AnalysisConfig) -> pd.DataFrame`). Return DataFrame columns: `X_Posi, Y_Posi, anomalous_wafer_count, total_wafer_count, anomaly_ratio`. Used by `ratio_threshold.py` (Task 8) and `pipeline.py` (Task 19).
+- Produces: `HotspotStrategy` (ABC with abstract `detect(long_df: pd.DataFrame, config: AnalysisConfig) -> pd.DataFrame`). Return DataFrame columns: `X_Posi, Y_Posi, anomalous_wafer_count, total_wafer_count, anomaly_ratio, insufficient_sample` (bool). Used by `ratio_threshold.py` (Task 8) and `pipeline.py` (Task 19).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -742,9 +799,11 @@ class HotspotStrategy(ABC):
     def detect(self, long_df: pd.DataFrame, config: AnalysisConfig) -> pd.DataFrame:
         """long_df: standard long-format table (see preprocessing). Returns a
         DataFrame with columns X_Posi, Y_Posi, anomalous_wafer_count,
-        total_wafer_count, anomaly_ratio, sorted by anomaly_ratio desc,
-        restricted to coordinates meeting config.hotspot_ratio_threshold and
-        config.min_wafer_count."""
+        total_wafer_count, anomaly_ratio, insufficient_sample (bool), sorted
+        by anomaly_ratio desc, restricted to coordinates meeting
+        config.hotspot_ratio_threshold. Coordinates below
+        config.min_wafer_count are kept but flagged insufficient_sample=True:
+        reported raw, excluded from root-cause analysis."""
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -806,21 +865,25 @@ def test_detect_identifies_hotspot_above_ratio_threshold():
 
     result = RatioThreshold().detect(long_df, config)
 
-    assert len(result) == 1
-    row = result.iloc[0]
+    sufficient = result[~result["insufficient_sample"]]
+    assert len(sufficient) == 1
+    row = sufficient.iloc[0]
     assert (row["X_Posi"], row["Y_Posi"]) == (0.0, 0.0)
     assert row["anomalous_wafer_count"] == 4
     assert row["total_wafer_count"] == 6
     assert row["anomaly_ratio"] == pytest.approx(4 / 6)
 
 
-def test_detect_excludes_coordinate_below_min_wafer_count():
+def test_detect_flags_coordinate_below_min_wafer_count():
     long_df = _long_df()
     config = AnalysisConfig(min_wafer_count=5)
 
     result = RatioThreshold().detect(long_df, config)
 
-    assert not ((result["X_Posi"] == 12.0) & (result["Y_Posi"] == 0.0)).any()
+    flagged = result[(result["X_Posi"] == 12.0) & (result["Y_Posi"] == 0.0)]
+    assert len(flagged) == 1
+    assert bool(flagged["insufficient_sample"].iloc[0]) is True
+    assert flagged["anomaly_ratio"].iloc[0] == pytest.approx(1.0)
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -857,8 +920,10 @@ class RatioThreshold(HotspotStrategy):
             grouped["anomalous_wafer_count"] / grouped["total_wafer_count"]
         )
 
-        grouped = grouped[grouped["total_wafer_count"] >= config.min_wafer_count]
         grouped = grouped[grouped["anomaly_ratio"] >= config.hotspot_ratio_threshold]
+        grouped["insufficient_sample"] = (
+            grouped["total_wafer_count"] < config.min_wafer_count
+        )
 
         return grouped.sort_values(
             ["anomaly_ratio", "anomalous_wafer_count"], ascending=False
@@ -1129,6 +1194,9 @@ class MajorityRule(NoiseFilterStrategy):
             )
             anomalous = litho_points[coord_mask]
             total_anomalous = len(anomalous)
+            if total_anomalous == 0:
+                surviving_rows.append(hotspot)
+                continue
 
             chuck_counts = anomalous["ChuckID"].value_counts()
             top_chuck, chuck_n = chuck_counts.index[0], chuck_counts.iloc[0]
@@ -1145,6 +1213,7 @@ class MajorityRule(NoiseFilterStrategy):
                     RootCauseDetail(
                         Suspect_Pre_ToolID=owning_tool,
                         Suspect_Pre_ChamberID=top_chuck,
+                        Suspect_Pre_StepID="N/A",
                         Confidence_Score=chuck_share * 100,
                         Root_Cause_Type=root_cause_type,
                         Affected_Coordinates=[(hotspot["X_Posi"], hotspot["Y_Posi"])],
@@ -1165,6 +1234,7 @@ class MajorityRule(NoiseFilterStrategy):
                     RootCauseDetail(
                         Suspect_Pre_ToolID=top_tool,
                         Suspect_Pre_ChamberID="N/A",
+                        Suspect_Pre_StepID="N/A",
                         Confidence_Score=tool_share * 100,
                         Root_Cause_Type="LITHO_TOOL_ISSUE",
                         Affected_Coordinates=[(hotspot["X_Posi"], hotspot["Y_Posi"])],
@@ -1277,7 +1347,8 @@ class RootCauseStrategy(ABC):
         self, group_df: pd.DataFrame, config: AnalysisConfig
     ) -> list[RootCauseCandidate]:
         """group_df: rows for wafers at one hotspot coordinate and a single
-        Pre_StageID group, with columns Pre_ToolID, Pre_ChamberID, is_anomaly.
+        (Pre_StageID, Pre_StepID) group, with columns Pre_ToolID,
+        Pre_ChamberID, is_anomaly.
         Returns a list of suspect Pre_ToolID+Pre_ChamberID candidates (usually
         0 or 1 entries; the 'both' cross-validation strategy may return 2 when
         its sub-strategies disagree, each marked requires_manual_review=True)."""
@@ -1353,6 +1424,23 @@ def test_analyze_returns_empty_when_no_significant_association():
     result = StatisticalStrategy().analyze(group_df, config)
 
     assert result == []
+
+
+def test_analyze_uses_fisher_fallback_for_small_expected_counts():
+    rows = []
+    for _ in range(5):
+        rows.append({"Pre_ToolID": "CMP_01", "Pre_ChamberID": "ChamberA", "is_anomaly": True})
+    for _ in range(5):
+        rows.append({"Pre_ToolID": "CMP_02", "Pre_ChamberID": "ChamberB", "is_anomaly": False})
+    group_df = pd.DataFrame(rows)
+    config = AnalysisConfig(alpha=0.05)
+
+    result = StatisticalStrategy().analyze(group_df, config)
+
+    assert len(result) == 1
+    assert result[0].suspect_tool_id == "CMP_01"
+    assert result[0].metrics["fisher_fallback"] == 1.0
+    assert "p_value_global" not in result[0].metrics
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1366,6 +1454,7 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'nce_analysis.root_cau
 ```python
 import pandas as pd
 from scipy.stats import chi2_contingency, fisher_exact
+from scipy.stats.contingency import expected_freq
 
 from nce_analysis.config import AnalysisConfig
 from nce_analysis.root_cause.base import RootCauseCandidate, RootCauseStrategy
@@ -1387,9 +1476,16 @@ class StatisticalStrategy(RootCauseStrategy):
         if contingency.shape[0] < 2:
             return []
 
-        _, p_global, _, _ = chi2_contingency(contingency)
-        if p_global >= config.alpha:
-            return []
+        # Chi-square is unreliable when any expected cell count is < 5; in
+        # that case skip the global gate and rely on the per-combo one-vs-rest
+        # Fisher exact tests below (spec §7 fallback behavior).
+        expected = expected_freq(contingency.to_numpy())
+        fisher_fallback = bool((expected < 5).any())
+        p_global = None
+        if not fisher_fallback:
+            _, p_global, _, _ = chi2_contingency(contingency)
+            if p_global >= config.alpha:
+                return []
 
         overall_anomaly_count = contingency[True].sum()
         overall_normal_count = contingency[False].sum()
@@ -1409,22 +1505,25 @@ class StatisticalStrategy(RootCauseStrategy):
                 best_combo = combo
                 best_odds_ratio = odds_ratio
 
-        if best_combo is None:
+        if best_combo is None or best_p >= config.alpha:
             return []
 
         tool_id, chamber_id = best_combo.split("|", 1)
         confidence_score = (1 - best_p) * 100
+        metrics = {
+            "p_value_combo": float(best_p),
+            "odds_ratio": float(best_odds_ratio),
+            "sample_size": float(len(working)),
+            "fisher_fallback": 1.0 if fisher_fallback else 0.0,
+        }
+        if p_global is not None:
+            metrics["p_value_global"] = float(p_global)
         return [
             RootCauseCandidate(
                 suspect_tool_id=tool_id,
                 suspect_chamber_id=chamber_id,
                 confidence_score=confidence_score,
-                metrics={
-                    "p_value_global": float(p_global),
-                    "p_value_combo": float(best_p),
-                    "odds_ratio": float(best_odds_ratio),
-                    "sample_size": float(len(working)),
-                },
+                metrics=metrics,
             )
         ]
 ```
@@ -1432,7 +1531,7 @@ class StatisticalStrategy(RootCauseStrategy):
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `pytest tests/test_statistical.py -v`
-Expected: PASS (2 tests)
+Expected: PASS (3 tests)
 
 - [ ] **Step 5: Commit**
 
@@ -1539,7 +1638,14 @@ class MLStrategy(RootCauseStrategy):
 
         explainer = shap.TreeExplainer(model)
         shap_values = explainer.shap_values(features)
-        positive_shap = shap_values[1] if isinstance(shap_values, list) else shap_values
+        # Binary classifiers: older shap returns list[class0_array, class1_array];
+        # newer shap returns one ndarray with a trailing class axis.
+        if isinstance(shap_values, list):
+            positive_shap = shap_values[1]
+        elif shap_values.ndim == 3:
+            positive_shap = shap_values[..., 1]
+        else:
+            positive_shap = shap_values
 
         mean_contribution = positive_shap.mean(axis=0)
         combo_names = encoder.categories_[0]
@@ -1799,7 +1905,8 @@ class DriftStrategy(ABC):
     ) -> tuple[str, dict[str, float]]:
         """series_df: columns Pre_Execute_Time (datetime-parseable), NCE_Value
         for all wafers processed by one suspect Pre_ToolID+Pre_ChamberID
-        combination at the affected coordinate. Returns
+        combination within a single (Pre_StageID, Pre_StepID) group at the
+        affected coordinate. Returns
         (root_cause_type, metrics) where root_cause_type is one of
         'SPECIFIC_CHAMBER_DEFECT', 'CHAMBER_DRIFT', 'CHAMBER_SUDDEN_SHIFT'."""
 ```
@@ -2049,8 +2156,8 @@ git commit -m "feat: implement Correlation drift strategy"
 - Test: `tests/test_result.py`
 
 **Interfaces:**
-- Consumes: `AnalysisConfig` from `nce_analysis.config`; `RootCauseDetail`, `AnalysisResult` from `nce_analysis.schema`
-- Produces: `aggregate_results(details: list[RootCauseDetail], config: AnalysisConfig) -> AnalysisResult`. Used by `pipeline.py` (Task 19).
+- Consumes: `AnalysisConfig` from `nce_analysis.config`; `RootCauseDetail`, `AnalysisResult`, `InsufficientSampleHotspot` from `nce_analysis.schema`
+- Produces: `aggregate_results(details: list[RootCauseDetail], config: AnalysisConfig, insufficient_sample_hotspots: list[InsufficientSampleHotspot] | None = None) -> AnalysisResult`. `Details` keeps per-coordinate granularity sorted by confidence desc. `Summary` merges details sharing `(Suspect_Pre_ToolID, Suspect_Pre_ChamberID, Suspect_Pre_StepID, Root_Cause_Type)` into one entry (coordinates unioned, confidence/metrics from the highest-confidence member, `Requires_Manual_Review` OR-ed) before truncating to `summary_top_n` — so top-N is not filled by one suspect repeated per coordinate. Used by `pipeline.py` (Task 19).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2058,37 +2165,64 @@ git commit -m "feat: implement Correlation drift strategy"
 ```python
 from nce_analysis.config import AnalysisConfig
 from nce_analysis.result import aggregate_results
-from nce_analysis.schema import RootCauseDetail
+from nce_analysis.schema import InsufficientSampleHotspot, RootCauseDetail
 
 
-def _detail(score):
+def _detail(score, coord=(0.0, 0.0), chamber="ChamberA"):
     return RootCauseDetail(
         Suspect_Pre_ToolID="CMP_01",
-        Suspect_Pre_ChamberID="ChamberA",
+        Suspect_Pre_ChamberID=chamber,
+        Suspect_Pre_StepID="3580.01",
         Confidence_Score=score,
         Root_Cause_Type="SPECIFIC_CHAMBER_DEFECT",
-        Affected_Coordinates=[(0.0, 0.0)],
+        Affected_Coordinates=[coord],
         Metrics={},
     )
 
 
-def test_aggregate_results_sorts_by_confidence_descending():
+def test_aggregate_results_sorts_details_by_confidence_descending():
     details = [_detail(50.0), _detail(90.0), _detail(70.0)]
     config = AnalysisConfig(summary_top_n=2)
 
     result = aggregate_results(details, config)
 
     assert [d.Confidence_Score for d in result.Details] == [90.0, 70.0, 50.0]
-    assert len(result.Summary) == 2
-    assert result.Summary[0].Confidence_Score == 90.0
     assert result.Config_Used.summary_top_n == 2
 
 
-def test_aggregate_results_handles_empty_details():
-    result = aggregate_results([], AnalysisConfig())
+def test_aggregate_results_merges_same_suspect_into_one_summary_entry():
+    details = [
+        _detail(90.0, coord=(0.0, 0.0)),
+        _detail(70.0, coord=(6.0, 0.0)),
+        _detail(60.0, coord=(12.0, 0.0), chamber="ChamberB"),
+    ]
+    config = AnalysisConfig(summary_top_n=5)
+
+    result = aggregate_results(details, config)
+
+    assert len(result.Summary) == 2
+    top = result.Summary[0]
+    assert top.Suspect_Pre_ChamberID == "ChamberA"
+    assert top.Confidence_Score == 90.0
+    assert set(top.Affected_Coordinates) == {(0.0, 0.0), (6.0, 0.0)}
+    assert result.Summary[1].Suspect_Pre_ChamberID == "ChamberB"
+    assert len(result.Details) == 3
+
+
+def test_aggregate_results_handles_empty_details_and_carries_insufficient():
+    hotspot = InsufficientSampleHotspot(
+        X_Posi=0.0,
+        Y_Posi=0.0,
+        anomaly_ratio=1.0,
+        anomalous_wafer_count=2,
+        total_wafer_count=2,
+    )
+
+    result = aggregate_results([], AnalysisConfig(), [hotspot])
 
     assert result.Summary == []
     assert result.Details == []
+    assert result.Insufficient_Sample_Hotspots == [hotspot]
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -2103,17 +2237,44 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'nce_analysis.result'`
 from datetime import datetime, timezone
 
 from nce_analysis.config import AnalysisConfig
-from nce_analysis.schema import AnalysisResult, RootCauseDetail
+from nce_analysis.schema import AnalysisResult, InsufficientSampleHotspot, RootCauseDetail
 
 
 def aggregate_results(
-    details: list[RootCauseDetail], config: AnalysisConfig
+    details: list[RootCauseDetail],
+    config: AnalysisConfig,
+    insufficient_sample_hotspots: list[InsufficientSampleHotspot] | None = None,
 ) -> AnalysisResult:
     sorted_details = sorted(details, key=lambda d: d.Confidence_Score, reverse=True)
-    summary = sorted_details[: config.summary_top_n]
+
+    # Summary: one entry per suspect. Iterating in confidence order means the
+    # first detail seen per key carries the group's max confidence and metrics,
+    # and dict insertion order keeps the summary confidence-sorted.
+    merged: dict[tuple, RootCauseDetail] = {}
+    for detail in sorted_details:
+        key = (
+            detail.Suspect_Pre_ToolID,
+            detail.Suspect_Pre_ChamberID,
+            detail.Suspect_Pre_StepID,
+            detail.Root_Cause_Type,
+        )
+        if key not in merged:
+            merged[key] = detail.model_copy(deep=True)
+            continue
+        entry = merged[key]
+        entry.Affected_Coordinates = entry.Affected_Coordinates + [
+            coord
+            for coord in detail.Affected_Coordinates
+            if coord not in entry.Affected_Coordinates
+        ]
+        entry.Requires_Manual_Review = (
+            entry.Requires_Manual_Review or detail.Requires_Manual_Review
+        )
+
     return AnalysisResult(
-        Summary=summary,
+        Summary=list(merged.values())[: config.summary_top_n],
         Details=sorted_details,
+        Insufficient_Sample_Hotspots=insufficient_sample_hotspots or [],
         Generated_At=datetime.now(timezone.utc),
         Config_Used=config,
     )
@@ -2122,7 +2283,7 @@ def aggregate_results(
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `pytest tests/test_result.py -v`
-Expected: PASS (2 tests)
+Expected: PASS (3 tests)
 
 - [ ] **Step 5: Commit**
 
@@ -2140,7 +2301,7 @@ git commit -m "feat: implement result aggregation"
 - Test: `tests/test_pipeline_e2e.py`
 
 **Interfaces:**
-- Consumes: `AnalysisConfig` (Task 1), `AnalysisResult`, `RootCauseDetail` (Task 2), `WideHistoryReshape` (Task 6), `RatioThreshold` (Task 8), `MajorityRule` (Task 10), `StatisticalStrategy` (Task 12), `MLStrategy` (Task 13), `BothStrategy` (Task 14), `RegressionCusum` (Task 16), `Correlation` (Task 17), `aggregate_results` (Task 18)
+- Consumes: `AnalysisConfig` (Task 1), `AnalysisResult`, `RootCauseDetail`, `InsufficientSampleHotspot` (Task 2), `WideHistoryReshape` (Task 6), `RatioThreshold` (Task 8), `MajorityRule` (Task 10), `StatisticalStrategy` (Task 12), `MLStrategy` (Task 13), `BothStrategy` (Task 14), `RegressionCusum` (Task 16), `Correlation` (Task 17), `aggregate_results` (Task 18)
 - Produces: `run(raw_df: pd.DataFrame, config: AnalysisConfig | None = None) -> AnalysisResult` — the library's single public entry point.
 
 - [ ] **Step 1: Write the failing test**
@@ -2225,6 +2386,7 @@ def test_pipeline_identifies_injected_root_cause():
     top = result.Summary[0]
     assert top.Suspect_Pre_ToolID == "CMP_01"
     assert top.Suspect_Pre_ChamberID == "ChamberA"
+    assert top.Suspect_Pre_StepID == "CMP_STEP"
     assert top.Root_Cause_Type in {
         "SPECIFIC_CHAMBER_DEFECT",
         "CHAMBER_DRIFT",
@@ -2259,6 +2421,86 @@ def test_pipeline_returns_empty_result_when_no_hotspots():
 
     assert result.Details == []
     assert result.Summary == []
+    assert result.Insufficient_Sample_Hotspots == []
+
+
+def test_pipeline_distinguishes_repeated_stage_visits_by_step_id():
+    rows = []
+    litho_tools = ["LITHO_A", "LITHO_B", "LITHO_C"]
+    litho_chucks = ["CHK_1", "CHK_2", "CHK_3"]
+    for i in range(24):
+        anomalous = i < 12
+        rows.append(
+            {
+                "PartID": "PART1",
+                "WaferID": f"W{i}",
+                "StageID": "LITHO_M1",
+                "StepID": "S1",
+                "ToolID": litho_tools[i % 3],
+                "ChuckID": litho_chucks[i % 3],
+                "Execute_Time": f"2026-01-{(i % 28) + 1:02d}",
+                "Measurement_Points": [
+                    {"X_Posi": 0.0, "Y_Posi": 0.0, "NCE_Value": 25.0 if anomalous else 5.0}
+                ],
+                # Second CMP pass (most recent history level): tool assignment
+                # balanced across anomaly status — must NOT be blamed.
+                "Pre_StageID_1": "CMP",
+                "Pre_StepID_1": "3580.02",
+                "Pre_ToolID_1": "CMP_C" if i % 2 == 0 else "CMP_D",
+                "Pre_ChamberID_1": "ChamberM" if i % 2 == 0 else "ChamberN",
+                "Pre_Execute_Time_1": f"2025-12-{(i % 28) + 1:02d}",
+                # First CMP pass (earlier history level): the injected culprit.
+                "Pre_StageID_2": "CMP",
+                "Pre_StepID_2": "3580.01",
+                "Pre_ToolID_2": "CMP_A" if anomalous else "CMP_B",
+                "Pre_ChamberID_2": "ChamberX" if anomalous else "ChamberY",
+                "Pre_Execute_Time_2": f"2025-11-{(i % 28) + 1:02d}",
+            }
+        )
+    raw_df = pd.DataFrame(rows)
+    config = AnalysisConfig(root_cause_strategy="statistical")
+
+    result = pipeline.run(raw_df, config)
+
+    top = result.Summary[0]
+    assert top.Suspect_Pre_ToolID == "CMP_A"
+    assert top.Suspect_Pre_ChamberID == "ChamberX"
+    assert top.Suspect_Pre_StepID == "3580.01"
+    assert not any(d.Suspect_Pre_StepID == "3580.02" for d in result.Details)
+
+
+def test_pipeline_reports_insufficient_sample_hotspot_without_confidence():
+    rows = []
+    for i in range(2):
+        rows.append(
+            {
+                "PartID": "P1",
+                "WaferID": f"W{i}",
+                "StageID": "LITHO_M1",
+                "StepID": "S1",
+                "ToolID": "LITHO_A",
+                "ChuckID": "CHK_1",
+                "Execute_Time": f"2026-01-0{i + 1}",
+                "Measurement_Points": [{"X_Posi": 0.0, "Y_Posi": 0.0, "NCE_Value": 25.0}],
+                "Pre_StageID_1": "CMP",
+                "Pre_StepID_1": "3580.01",
+                "Pre_ToolID_1": "CMP_01",
+                "Pre_ChamberID_1": "ChamberA",
+                "Pre_Execute_Time_1": f"2025-12-0{i + 1}",
+            }
+        )
+    raw_df = pd.DataFrame(rows)
+    config = AnalysisConfig(min_wafer_count=5)
+
+    result = pipeline.run(raw_df, config)
+
+    assert result.Details == []
+    assert result.Summary == []
+    assert len(result.Insufficient_Sample_Hotspots) == 1
+    hotspot = result.Insufficient_Sample_Hotspots[0]
+    assert (hotspot.X_Posi, hotspot.Y_Posi) == (0.0, 0.0)
+    assert hotspot.anomaly_ratio == 1.0
+    assert hotspot.total_wafer_count == 2
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -2270,6 +2512,8 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'nce_analysis.pipeline
 
 `nce_analysis/pipeline.py`:
 ```python
+import logging
+
 import pandas as pd
 
 from nce_analysis.config import AnalysisConfig
@@ -2282,7 +2526,9 @@ from nce_analysis.result import aggregate_results
 from nce_analysis.root_cause.both import BothStrategy
 from nce_analysis.root_cause.ml import MLStrategy
 from nce_analysis.root_cause.statistical import StatisticalStrategy
-from nce_analysis.schema import AnalysisResult, RootCauseDetail
+from nce_analysis.schema import AnalysisResult, InsufficientSampleHotspot, RootCauseDetail
+
+logger = logging.getLogger(__name__)
 
 _ROOT_CAUSE_STRATEGIES = {
     "statistical": StatisticalStrategy,
@@ -2310,6 +2556,21 @@ def run(raw_df: pd.DataFrame, config: AnalysisConfig | None = None) -> AnalysisR
     if hotspots.empty:
         return aggregate_results([], config)
 
+    insufficient_hotspots = [
+        InsufficientSampleHotspot(
+            X_Posi=row["X_Posi"],
+            Y_Posi=row["Y_Posi"],
+            anomaly_ratio=row["anomaly_ratio"],
+            anomalous_wafer_count=int(row["anomalous_wafer_count"]),
+            total_wafer_count=int(row["total_wafer_count"]),
+        )
+        for _, row in hotspots[hotspots["insufficient_sample"]].iterrows()
+    ]
+    hotspots = hotspots[~hotspots["insufficient_sample"]]
+
+    if hotspots.empty:
+        return aggregate_results([], config, insufficient_hotspots)
+
     noise_result = noise_filter.filter(long_df, hotspots, config)
     details: list[RootCauseDetail] = list(noise_result.litho_self_issues)
 
@@ -2319,8 +2580,28 @@ def run(raw_df: pd.DataFrame, config: AnalysisConfig | None = None) -> AnalysisR
             (long_df["X_Posi"] == coord[0]) & (long_df["Y_Posi"] == coord[1])
         ]
 
-        for _, stage_group in point_rows.groupby("Pre_StageID"):
-            litho_points = stage_group.drop_duplicates(subset=["WaferID"]).copy()
+        # fillna keeps rows from a malformed history level (StageID present but
+        # no StepID column) visible instead of silently vanishing from groupby.
+        point_rows = point_rows.assign(
+            Pre_StepID=point_rows["Pre_StepID"].fillna("UNKNOWN")
+        )
+
+        for (pre_stage_id, pre_step_id), step_group in point_rows.groupby(
+            ["Pre_StageID", "Pre_StepID"]
+        ):
+            litho_points = (
+                step_group.sort_values("Pre_Execute_Time")
+                .drop_duplicates(subset=["WaferID"], keep="last")
+                .copy()
+            )
+            if len(litho_points) < len(step_group):
+                logger.warning(
+                    "Duplicate wafer records for stage %s step %s at %s "
+                    "(rework?); keeping the most recent Pre_Execute_Time per wafer.",
+                    pre_stage_id,
+                    pre_step_id,
+                    coord,
+                )
             litho_points["is_anomaly"] = (
                 litho_points["NCE_Value"] > config.spec_threshold
             )
@@ -2328,12 +2609,10 @@ def run(raw_df: pd.DataFrame, config: AnalysisConfig | None = None) -> AnalysisR
             candidates = root_cause_strategy.analyze(litho_points, config)
 
             for candidate in candidates:
-                combo_history = long_df[
-                    (long_df["Pre_ToolID"] == candidate.suspect_tool_id)
-                    & (long_df["Pre_ChamberID"] == candidate.suspect_chamber_id)
-                    & (long_df["X_Posi"] == coord[0])
-                    & (long_df["Y_Posi"] == coord[1])
-                ].drop_duplicates(subset=["WaferID"])
+                combo_history = litho_points[
+                    (litho_points["Pre_ToolID"] == candidate.suspect_tool_id)
+                    & (litho_points["Pre_ChamberID"] == candidate.suspect_chamber_id)
+                ]
 
                 if len(combo_history) < 3:
                     root_cause_type = "SPECIFIC_CHAMBER_DEFECT"
@@ -2347,6 +2626,7 @@ def run(raw_df: pd.DataFrame, config: AnalysisConfig | None = None) -> AnalysisR
                     RootCauseDetail(
                         Suspect_Pre_ToolID=candidate.suspect_tool_id,
                         Suspect_Pre_ChamberID=candidate.suspect_chamber_id,
+                        Suspect_Pre_StepID=pre_step_id,
                         Confidence_Score=candidate.confidence_score,
                         Root_Cause_Type=root_cause_type,
                         Affected_Coordinates=[coord],
@@ -2355,13 +2635,13 @@ def run(raw_df: pd.DataFrame, config: AnalysisConfig | None = None) -> AnalysisR
                     )
                 )
 
-    return aggregate_results(details, config)
+    return aggregate_results(details, config, insufficient_hotspots)
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `pytest tests/test_pipeline_e2e.py -v`
-Expected: PASS (2 tests)
+Expected: PASS (4 tests)
 
 - [ ] **Step 5: Run the full test suite to confirm no regressions**
 
@@ -2379,8 +2659,12 @@ git commit -m "feat: implement pipeline orchestrator and end-to-end test"
 
 ## Self-Review Notes
 
-**Spec coverage:** §1 (pure library) → Task 1 constraint. §2 (input shape) → Tasks 4-6. §3 (architecture) → all strategy base/impl pairs. §4 (preprocessing) → Tasks 4-6. §5 (hotspot) → Tasks 7-8. §6 (noise filter) → Tasks 9-10. §7 (root cause: statistical/ml/both) → Tasks 11-14. §8 (drift) → Tasks 15-17. §9 (taxonomy, v1 scope exclusion of PRODUCT_TOOL_MISMATCH) → Task 19 (no PartID feature added, confirmed absent). §10 (schemas) → Tasks 1-2. §11 (error handling: PreprocessingError, insufficient_sample) → Tasks 6, 8, 19. §12 (testing plan: per-strategy unit tests, noise-filter domain rules, preprocessing dynamic-N tests, e2e fixture) → covered throughout, e2e in Task 19.
+**Spec coverage:** §1 (pure library) → Task 1 constraint. §2 (input shape) → Tasks 4-6. §3 (architecture) → all strategy base/impl pairs. §4 (preprocessing) → Tasks 4-6. §5 (hotspot) → Tasks 7-8. §6 (noise filter) → Tasks 9-10. §7 (root cause: statistical/ml/both) → Tasks 11-14. §8 (drift) → Tasks 15-17. §9 (taxonomy, v1 scope exclusion of PRODUCT_TOOL_MISMATCH) → Task 19 (no PartID feature added, confirmed absent). §10 (schemas) → Tasks 1-2. §11 (error handling: PreprocessingError on missing history columns → Task 6; empty `Measurement_Points` skip/all-empty abort → Task 4; insufficient_sample reporting → Tasks 2, 8, 18, 19; chi-square→Fisher fallback → Task 12; rework de-dup with warning → Task 19). §12 (testing plan: per-strategy unit tests, noise-filter domain rules, preprocessing dynamic-N tests, e2e fixture) → covered throughout, e2e in Task 19.
 
 **Type consistency verified:** `RootCauseStrategy.analyze` returns `list[RootCauseCandidate]` consistently across base (Task 11), statistical (Task 12), ml (Task 13), both (Task 14), and is consumed as a list in pipeline.py (Task 19). `NoiseFilterStrategy.filter` returns `NoiseFilterResult` consistently between base (Task 9), majority_rule (Task 10), and pipeline.py (Task 19). `DriftStrategy.classify` returns `tuple[str, dict[str, float]]` consistently across base (Task 15), regression_cusum (Task 16), correlation (Task 17), pipeline.py (Task 19).
 
 **No placeholders:** every step contains complete, runnable code; no TBD/TODO markers.
+
+**Review fixes incorporated:** wafers with empty `Measurement_Points` are skipped with a logged warning, and an all-empty batch raises `PreprocessingError` (Task 4). The statistical strategy gates the global chi-square on expected cell counts ≥ 5 and otherwise falls back to the one-vs-rest Fisher exact tests, surfaced via the `fisher_fallback` metric; the winning combo must itself satisfy p < alpha (Task 12). Below-`min_wafer_count` hotspots are flagged by `RatioThreshold` (Task 8) and reported raw in `AnalysisResult.Insufficient_Sample_Hotspots` (Tasks 2, 18, 19) — never given a confidence score. `Summary` merges per-coordinate details per suspect so top-N is not one chamber repeated per coordinate (Task 18). The ML strategy handles both list and 3-D ndarray SHAP return shapes across shap versions (Task 13). `MajorityRule` guards the zero-anomalous-wafer edge (Task 10). The unused `xgboost` dependency was removed (Task 1).
+
+**Repeated stage visits:** root-cause grouping uses the composite `(Pre_StageID, Pre_StepID)` key in `pipeline.py` (Task 19), so a wafer that passed the same stage type twice (e.g. CMP steps `3580.01` and `3580.02`) contributes exactly one record to each step's analysis group instead of being arbitrarily de-duplicated. Residual duplicates within one group (rework/data duplication) keep the most recent `Pre_Execute_Time` record with a logged warning. `RootCauseDetail.Suspect_Pre_StepID` (Task 2) records which pass is blamed (`"N/A"` for LITHO self-issues from the noise filter, Task 10). Verified end-to-end by `test_pipeline_distinguishes_repeated_stage_visits_by_step_id` (Task 19).

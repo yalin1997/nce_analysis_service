@@ -35,9 +35,13 @@ spatial tolerance/binning needed.
 ## 3. Architecture
 
 Pipeline of swappable strategy components (each stage implements a common interface; a single
-`AnalysisConfig` selects which concrete strategy is used per stage). Per-`Pre_StageID`-type
-grouping (CMP / CVD / PVD analyzed independently) is done by an outer loop over the actual
-`Pre_StageID` values found after preprocessing — not by positional index.
+`AnalysisConfig` selects which concrete strategy is used per stage). Per-upstream-step grouping
+is done by an outer loop over the actual `(Pre_StageID, Pre_StepID)` combinations found after
+preprocessing — not by positional index. The composite key keeps repeated passes through the
+same stage type in separate analysis groups: a wafer may go through CMP twice, and StepID
+distinguishes the passes via its decimal suffix (e.g. `3580.01` vs `3580.02`). Each wafer
+therefore appears exactly once per analysis group, and comparisons are always same-step —
+controlling for process differences between steps of the same stage type.
 
 ```
 nce_analysis/
@@ -67,8 +71,8 @@ tests/
 └── ... (per-component unit tests + one end-to-end fixture test)
 ```
 
-Data flow: `Preprocessing → HotspotDetection → NoiseFilter → RootCauseAnalysis (per Pre_StageID
-group) → DriftAnalysis → ResultAggregation`.
+Data flow: `Preprocessing → HotspotDetection → NoiseFilter → RootCauseAnalysis (per
+(Pre_StageID, Pre_StepID) group) → DriftAnalysis → ResultAggregation`.
 
 ## 4. Preprocessing
 
@@ -90,8 +94,11 @@ Default `WideHistoryReshape` strategy:
    Y_Posi)` point will appear once per upstream stage it has a recorded history for (e.g. once for
    CMP, once for CVD).
 
-Downstream grouping by upstream stage type uses the **actual `Pre_StageID` value**, never the
-positional suffix.
+Downstream grouping by upstream process step uses the **actual `(Pre_StageID, Pre_StepID)`
+values**, never the positional suffix. A wafer that passed the same stage type twice (e.g. two
+CMP passes) contributes one long-format row per pass; the StepID difference (`3580.01` vs
+`3580.02`) routes each pass into its own analysis group downstream, so neither pass's
+tool/chamber record is silently discarded.
 
 ## 5. Hotspot Detection (`ratio_threshold`)
 
@@ -99,8 +106,9 @@ positional suffix.
    per-history-level expansion) before computing hotspot statistics, to avoid double counting.
 2. `is_anomaly = NCE_Value > spec_threshold` (config, default 15).
 3. Group by `(X_Posi, Y_Posi)`: `anomaly_ratio = anomalous_wafer_count / total_wafer_count`.
-   Coordinates with `total_wafer_count < min_wafer_count` (config, default 5) are excluded from
-   ranking (insufficient sample).
+   Coordinates with `total_wafer_count < min_wafer_count` (config, default 5) are flagged
+   `insufficient_sample`: excluded from root-cause analysis, but still reported with their raw
+   counts/ratio (see §11).
 4. Rank by `anomaly_ratio` desc (tiebreak: `anomalous_wafer_count` desc). Coordinates at or above
    `hotspot_ratio_threshold` (config, default 0.05) are treated as hotspots.
 
@@ -128,29 +136,37 @@ for each hotspot coordinate:
     # otherwise: passes filter, becomes a root-cause candidate
 ```
 
-## 7. Root Cause Analysis (per surviving hotspot, per `Pre_StageID` group)
+## 7. Root Cause Analysis (per surviving hotspot, per `(Pre_StageID, Pre_StepID)` group)
 
 ### `statistical` strategy
 1. Build a contingency table: `Pre_ToolID + Pre_ChamberID` combination × anomalous/normal.
-2. Global Chi-square test of independence; if any expected cell count < 5, fall back to Fisher's
-   exact test automatically (not an error path — a built-in behavior).
-3. If globally significant (`p < alpha`, default 0.05): run one-vs-rest Fisher exact tests per
-   combination; the suspect is the combination with the smallest p-value **and** odds ratio > 1
-   (elevated, not reduced, anomaly rate).
-4. `Confidence_Score = (1 - p_value) * 100`. `Metrics` includes p-value, odds ratio, sample counts.
+2. Global chi-square test of independence, gated on expected cell counts: if any expected count
+   is < 5 (via `scipy.stats.contingency.expected_freq`), the chi-square approximation is
+   unreliable — skip the global test and rely directly on the per-combination one-vs-rest Fisher
+   exact tests in step 3 (scipy's `fisher_exact` is 2×2-only, so this is the form the Fisher
+   fallback takes). Not an error path — a built-in behavior, surfaced as the `fisher_fallback`
+   entry in `Metrics`.
+3. If the global test ran and is significant (`p < alpha`, default 0.05) — or the Fisher fallback
+   is active — run one-vs-rest Fisher exact tests per combination; the suspect is the combination
+   with the smallest p-value **and** odds ratio > 1 (elevated, not reduced, anomaly rate). The
+   winning combination must itself satisfy `p < alpha`, otherwise no suspect is reported.
+4. `Confidence_Score = (1 - p_value) * 100`. `Metrics` includes p-values, odds ratio, sample size.
 
 ### `ml` strategy
 1. Features: `Pre_ToolID`, `Pre_ChamberID` (categorical). Label: `is_anomaly`.
 2. Train a shallow Decision Tree (interpretability) or XGBoost (when interaction effects matter),
-   compute SHAP values.
+   compute SHAP values. v1 ships the Decision Tree only; XGBoost is a future strategy variant and
+   not a v1 dependency.
 3. Identify the specific category value with the highest positive SHAP contribution toward
    `is_anomaly = 1` (not just "ToolID is important" in the abstract).
 4. `Confidence_Score` = normalized contribution share of the top category, scaled to percentage.
 
 ### `both` (cross-validation)
-Run both strategies independently. If they agree on the same suspect combination, average/boost
-the confidence score and mark as cross-validated. If they disagree, report both candidates and set
-`Requires_Manual_Review = true`.
+Run both strategies independently. If they agree on the same suspect combination, keep the higher
+of the two confidence scores (agreement between independent methods must not dilute the stronger
+signal) and merge both strategies' metrics (prefixed `statistical_` / `ml_`). If they disagree,
+report both candidates with `Requires_Manual_Review = true`. If only one strategy finds a suspect,
+report it with `Requires_Manual_Review = true` (single-method evidence).
 
 ## 8. Drift Analysis (on root-cause suspects)
 
@@ -186,6 +202,7 @@ class AnalysisConfig(BaseModel):
     root_cause_strategy: Literal["statistical", "ml", "both"] = "both"
     drift_strategy: Literal["regression_cusum", "correlation"] = "regression_cusum"
     alpha: float = 0.05
+    summary_top_n: int = 5
 ```
 
 ### Output
@@ -193,6 +210,7 @@ class AnalysisConfig(BaseModel):
 class RootCauseDetail(BaseModel):
     Suspect_Pre_ToolID: str
     Suspect_Pre_ChamberID: str
+    Suspect_Pre_StepID: str  # which upstream pass is blamed; "N/A" for LITHO_* noise-filter results
     Confidence_Score: float  # 0-100
     Root_Cause_Type: Literal[
         "LITHO_TOOL_ISSUE", "LITHO_CHUCK_ISSUE", "LITHO_CHUCK_CONTAMINATION",
@@ -202,9 +220,21 @@ class RootCauseDetail(BaseModel):
     Metrics: dict[str, float]
     Requires_Manual_Review: bool = False
 
+class InsufficientSampleHotspot(BaseModel):
+    X_Posi: float
+    Y_Posi: float
+    anomaly_ratio: float
+    anomalous_wafer_count: int
+    total_wafer_count: int
+
 class AnalysisResult(BaseModel):
-    Summary: list[RootCauseDetail]   # sorted by Confidence_Score desc
+    # one entry per suspect (tool+chamber+step+type), coordinates merged,
+    # sorted by Confidence_Score desc, truncated to summary_top_n
+    Summary: list[RootCauseDetail]
+    # per-coordinate granularity, sorted by Confidence_Score desc
     Details: list[RootCauseDetail]
+    # raw counts/ratio only — no confidence computed (see §11)
+    Insufficient_Sample_Hotspots: list[InsufficientSampleHotspot] = []
     Generated_At: datetime
     Config_Used: AnalysisConfig
 ```
@@ -216,16 +246,22 @@ Entry point: `result: AnalysisResult = pipeline.run(raw_df, config)`;
 
 Validate only at system boundaries; trust internal data once past them.
 
-- Input: Pydantic validates required fields/types. A wafer with empty `Measurement_Points` is
-  skipped with a logged warning — does not abort the batch.
+- Input: structural validation at the boundary (history-column regex, `Measurement_Points`
+  shape). A wafer with an empty `Measurement_Points` list is skipped with a logged warning — it
+  does not abort the batch. If **every** wafer in the batch is empty, raise `PreprocessingError`
+  (nothing to analyze).
 - Preprocessing: if the history-level regex matches **zero** `Pre_*_i` columns, raise
   `PreprocessingError` explicitly (this means the input doesn't match the expected schema — it
   should not be silently treated as "no upstream history").
-- A hotspot whose total wafer count is below `min_wafer_count` is marked `insufficient_sample`
-  and reported with its raw ratio only — no statistical/ML confidence is computed, to avoid a
-  spurious confidence score from too few samples.
+- A hotspot whose total wafer count is below `min_wafer_count` is flagged `insufficient_sample`
+  and reported in `AnalysisResult.Insufficient_Sample_Hotspots` with its raw counts/ratio only —
+  no statistical/ML confidence is computed, to avoid a spurious confidence score from too few
+  samples.
 - Root-cause statistical strategy's chi-square→Fisher fallback is a designed behavior, not an
   exception path.
+- If the same wafer has two history records with an identical `(Pre_StageID, Pre_StepID)`
+  combination (rework or upstream data duplication), keep the record with the most recent
+  `Pre_Execute_Time` and log a warning — do not abort the batch.
 
 ## 12. Testing Plan
 
@@ -238,3 +274,6 @@ Validate only at system boundaries; trust internal data once past them.
   correct `Measurement_Points` explosion.
 - One end-to-end fixture test: a full synthetic batch run through the whole pipeline, asserting
   the final JSON structure and that it identifies the known-injected root cause.
+- One repeated-stage-visit e2e test: wafers that passed CMP twice (StepID `3580.01` and
+  `3580.02`), asserting the injected culprit is attributed to the correct step and the other
+  pass yields no spurious suspect.
