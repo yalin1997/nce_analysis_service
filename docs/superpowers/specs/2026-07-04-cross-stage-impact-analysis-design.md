@@ -221,8 +221,8 @@ Validate only at system boundaries; trust internal data once past them.
 - Preprocessing: if the history-level regex matches **zero** `Pre_*_i` columns, raise
   `PreprocessingError` explicitly (this means the input doesn't match the expected schema — it
   should not be silently treated as "no upstream history").
-  a hotspot's total wafer count below `min_wafer_count` is marked `insufficient_sample` and
-  reported with its raw ratio only — no statistical/ML confidence is computed, to avoid a
+- A hotspot whose total wafer count is below `min_wafer_count` is marked `insufficient_sample`
+  and reported with its raw ratio only — no statistical/ML confidence is computed, to avoid a
   spurious confidence score from too few samples.
 - Root-cause statistical strategy's chi-square→Fisher fallback is a designed behavior, not an
   exception path.
