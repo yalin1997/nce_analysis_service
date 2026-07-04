@@ -1,0 +1,3 @@
+# Overrides AnalysisConfig defaults; any field not listed here keeps
+# its default value (see nce_analysis/config.py).
+summary_top_n: 3
