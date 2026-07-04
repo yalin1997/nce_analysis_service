@@ -2,7 +2,7 @@ import pandas as pd
 import pytest
 
 from nce_analysis.preprocessing.base import PreprocessingError
-from nce_analysis.preprocessing.wide_history_reshape import explode_measurement_points
+from nce_analysis.preprocessing.wide_history_reshape import explode_measurement_points, discover_history_levels
 
 
 def test_explode_measurement_points_expands_rows():
@@ -58,3 +58,35 @@ def test_explode_raises_when_all_wafers_have_empty_measurement_points():
 
     with pytest.raises(PreprocessingError):
         explode_measurement_points(raw_df)
+
+
+def test_discover_history_levels_finds_all_levels():
+    columns = [
+        "WaferID",
+        "X_Posi",
+        "Pre_StageID_1",
+        "Pre_StepID_1",
+        "Pre_ToolID_1",
+        "Pre_ChamberID_1",
+        "Pre_Execute_Time_1",
+        "Pre_StageID_2",
+        "Pre_StepID_2",
+        "Pre_ToolID_2",
+        "Pre_ChamberID_2",
+        "Pre_Execute_Time_2",
+    ]
+
+    levels = discover_history_levels(columns)
+
+    assert set(levels.keys()) == {1, 2}
+    assert levels[1]["StageID"] == "Pre_StageID_1"
+    assert levels[1]["ToolID"] == "Pre_ToolID_1"
+    assert levels[2]["ChamberID"] == "Pre_ChamberID_2"
+
+
+def test_discover_history_levels_returns_empty_when_no_match():
+    columns = ["WaferID", "X_Posi", "NCE_Value"]
+
+    levels = discover_history_levels(columns)
+
+    assert levels == {}

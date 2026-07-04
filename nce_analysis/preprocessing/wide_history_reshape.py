@@ -1,10 +1,29 @@
 import logging
+import re
+from collections import defaultdict
 
 import pandas as pd
 
 from nce_analysis.preprocessing.base import PreprocessingError
 
 logger = logging.getLogger(__name__)
+
+HISTORY_FIELD_NAMES = ["StageID", "StepID", "ToolID", "ChamberID", "Execute_Time"]
+_HISTORY_COLUMN_PATTERN = re.compile(
+    r"^Pre_(StageID|StepID|ToolID|ChamberID|Execute_Time)_(\d+)$"
+)
+
+
+def discover_history_levels(columns) -> dict[int, dict[str, str]]:
+    """Scan column names for Pre_<Field>_<N> groups and return, per level N,
+    a mapping of canonical field name -> actual column name."""
+    levels: dict[int, dict[str, str]] = defaultdict(dict)
+    for col in columns:
+        match = _HISTORY_COLUMN_PATTERN.match(col)
+        if match:
+            field_name, level_str = match.groups()
+            levels[int(level_str)][field_name] = col
+    return dict(levels)
 
 
 def explode_measurement_points(raw_df: pd.DataFrame) -> pd.DataFrame:
