@@ -82,6 +82,46 @@ def test_load_input_csv_unrecognized_shape_raises(tmp_path):
         load_input(csv_path)
 
 
+def test_load_input_csv_wide_format_preserves_step_id_trailing_zero(tmp_path):
+    row = _wafer_row("W1", Pre_StepID_1="3580.10")
+    row["Measurement_Points"] = json.dumps(
+        [{"X_Posi": 0.0, "Y_Posi": 0.0, "NCE_Value": 16.0}]
+    )
+    csv_path = tmp_path / "data.csv"
+    pd.DataFrame([row]).to_csv(csv_path, index=False)
+
+    result = load_input(csv_path)
+
+    step_id = result.iloc[0]["Pre_StepID_1"]
+    assert step_id == "3580.10"
+    assert isinstance(step_id, str)
+
+
+def test_load_input_csv_long_format_preserves_step_id_trailing_zero(tmp_path):
+    rows = [
+        {
+            **_wafer_row("W1", Pre_StepID_1="3580.10"),
+            "X_Posi": 0.0,
+            "Y_Posi": 0.0,
+            "NCE_Value": 16.0,
+        },
+        {
+            **_wafer_row("W1", Pre_StepID_1="3580.10"),
+            "X_Posi": 6.0,
+            "Y_Posi": 0.0,
+            "NCE_Value": 5.0,
+        },
+    ]
+    csv_path = tmp_path / "data.csv"
+    pd.DataFrame(rows).to_csv(csv_path, index=False)
+
+    result = load_input(csv_path)
+
+    step_id = result.loc[result["WaferID"] == "W1", "Pre_StepID_1"].iloc[0]
+    assert step_id == "3580.10"
+    assert isinstance(step_id, str)
+
+
 def test_load_input_parquet_round_trips_measurement_points_as_list(tmp_path):
     row = _wafer_row("W1")
     row["Measurement_Points"] = [{"X_Posi": 0.0, "Y_Posi": 0.0, "NCE_Value": 16.0}]

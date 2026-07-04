@@ -17,7 +17,7 @@ def load_input(path: str | Path) -> pd.DataFrame:
     suffix = path.suffix.lower()
 
     if suffix == ".csv":
-        return _normalize_csv(pd.read_csv(path))
+        return _normalize_csv(_read_csv_preserving_ids(path))
     if suffix in (".parquet", ".pq"):
         df = pd.read_parquet(path)
         df["Measurement_Points"] = df["Measurement_Points"].map(list)
@@ -26,6 +26,16 @@ def load_input(path: str | Path) -> pd.DataFrame:
     raise InputFormatError(
         f"Unrecognized input file extension {suffix!r} (expected .csv, .parquet, or .pq)"
     )
+
+
+def _read_csv_preserving_ids(path: Path) -> pd.DataFrame:
+    """Read a CSV with every column forced to str except the long-format
+    measurement columns, so ID/metadata columns (e.g. a Pre_StepID value
+    like "3580.10") are never silently coerced to float64 by pandas' type
+    inference and lose their exact string representation."""
+    header = pd.read_csv(path, nrows=0).columns
+    dtype = {col: str for col in header if col not in _LONG_POINT_COLUMNS}
+    return pd.read_csv(path, dtype=dtype)
 
 
 def _normalize_csv(df: pd.DataFrame) -> pd.DataFrame:
