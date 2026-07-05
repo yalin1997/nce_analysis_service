@@ -27,7 +27,10 @@ class RegressionCusum(DriftStrategy):
         cusum = np.cumsum(residuals - residuals.mean())
         cusum_range = float(cusum.max() - cusum.min())
         residual_std = float(residuals.std())
-        cusum_threshold = 5 * residual_std if residual_std > 0 else 0.0
+        n = len(residuals)
+        cusum_threshold = (
+            3.0 * residual_std * np.sqrt(n) if residual_std > 0 and n > 0 else 0.0
+        )
         change_point_detected = cusum_threshold > 0 and cusum_range > cusum_threshold
 
         metrics = {
@@ -35,6 +38,7 @@ class RegressionCusum(DriftStrategy):
             "slope_p_value": float(p_value),
             "cusum_range": cusum_range,
             "cusum_threshold": cusum_threshold,
+            "cusum_threshold_method": 1.0,
         }
 
         if change_point_detected:
