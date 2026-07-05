@@ -90,26 +90,42 @@ def resolve_detail_history(
 ) -> pd.DataFrame:
     """Given one RootCauseDetail from AnalysisResult, reconstruct the
     wafer-level rows it was computed from. Returns columns normalized for
-    chart consumption: time, NCE_Value, group_label, WaferID, is_anomaly."""
+    chart consumption: time, NCE_Value, group_label, WaferID, is_anomaly,
+    is_suspect_group."""
 ```
 
-Behavior branches on `detail.Root_Cause_Type`. In both branches, the
-**filtered (fixed) dimension** is whatever the original classification
+Behavior branches on `detail.Root_Cause_Type`. For the two LITHO-self types,
+the **filtered (fixed) dimension** is whatever the original classification
 actually keyed on; the **remaining (free) dimension** becomes `group_label`
 so the chart can still show real variation instead of a meaningless
-single-color group:
+single-color group. For the upstream types, the filter is deliberately
+*broader than the suspect* — see rationale below the table:
 
-| Root_Cause_Type | Filter (fixed) | `group_label` (free) | time axis |
+| Root_Cause_Type | Filter | `group_label` | time axis |
 |---|---|---|---|
 | `LITHO_CHUCK_ISSUE` / `_CONTAMINATION` | `ToolID == Suspect_Pre_ToolID` **and** `ChuckID == Suspect_Pre_ChamberID` (composite — see rationale below) | none (both dims pinned) — single group | `Execute_Time` |
 | `LITHO_TOOL_ISSUE` | `ToolID == Suspect_Pre_ToolID` | `ChuckID` (chuck was never considered for this classification, `Suspect_Pre_ChamberID` is `"N/A"`) | `Execute_Time` |
-| `SPECIFIC_CHAMBER_DEFECT` / `CHAMBER_DRIFT` / `CHAMBER_SUDDEN_SHIFT` | `Pre_StepID == Suspect_Pre_StepID` and `matches_suspect(...)` (reuses existing granularity logic — Tool alone or Tool+Chamber) | `Pre_ChamberID` if `granularity == "tool"`, else the fixed `Pre_ToolID|Pre_ChamberID` combo (single group) | `Pre_Execute_Time` |
+| `SPECIFIC_CHAMBER_DEFECT` / `CHAMBER_DRIFT` / `CHAMBER_SUDDEN_SHIFT` | `Pre_StepID == Suspect_Pre_StepID` only — **every** Tool(+Chamber) at that process step, not just the suspect | every distinct `Pre_ToolID` (`granularity == "tool"`) or `Pre_ToolID\|Pre_ChamberID` combo (`granularity == "chamber"`) present in the group | `Pre_Execute_Time` |
 
 All branches first filter to `X_Posi/Y_Posi ∈ detail.Affected_Coordinates`
 and dedupe by `(WaferID, X_Posi, Y_Posi)` (LITHO-self branch, matching
 `majority_rule.py`) or by `WaferID` keeping the latest timestamp (upstream
 branch, matching `pipeline.py`'s rework handling) before computing
 `is_anomaly = NCE_Value > config.spec_threshold`.
+
+**Why the upstream branch shows every combo at that step, not just the
+suspect:** the point of the chart is to visually confirm the recommended
+Tool/Chamber's `NCE_Value` trend is actually worse than its peers at the
+same process step — that comparison is impossible if the chart only ever
+shows the suspect in isolation. `matches_suspect(long_df, candidate, config)`
+still runs here, but as a **tag**, not a filter: it produces the
+`is_suspect_group` boolean column so the render layer (§5) knows which rows
+are the suspect's own, without re-deriving the granularity decision. The
+`X_Posi/Y_Posi ∈ detail.Affected_Coordinates` restriction still applies to
+every row, suspect and peers alike — the comparison is "same physical
+coordinate, different upstream machine," not different coordinates
+entirely, otherwise location-driven variation would be conflated with
+machine-driven variation.
 
 **Why the chuck branch filters on `ToolID` *and* `ChuckID` together, not
 `ChuckID` alone:** `ChuckID` is only unique *within* a LITHO tool (each tool
@@ -154,21 +170,35 @@ every `Details` entry)
   (in-spec vs. anomalous) are different jobs, so they go on two different
   channels rather than colliding on one hue:
   - **Hue** (categorical, fixed 8-slot order: blue/aqua/yellow/green/violet/
-    red/magenta/orange) = `group_label`. Typically 1–2 distinct values given
-    §4's filtering (2 at most for the free-Chuck/free-Chamber cases); if it
-    ever exceeds 8, the tail folds into a neutral "Other."
+    red/magenta/orange) = `group_label`. For LITHO-self panels, typically
+    1–2 distinct values (per §4's fixed/free split). For upstream panels,
+    potentially many — every Tool(+Chamber) sharing that process step.
   - **Shape** = anomaly status: circle = within spec, diamond =
     `NCE_Value > spec_threshold`.
   - Colors are assigned **once, globally, across every panel in the report**
     before rendering any individual chart — not per-panel — so the same
     real Tool/Chamber/Chuck value gets the same color everywhere it appears.
+    Assignment order: **every entity that is `is_suspect_group` in at least
+    one panel gets a real slot first**, decided once across the whole
+    report — so a suspect can never be bumped to "Other" in its own panel
+    just because it's globally low-traffic; remaining slots go to the
+    highest-wafer-count non-suspect entities; anything past 8 total folds
+    into a neutral "Other." "Other" keeps its true Tool/Chamber identity in
+    the hover tooltip — only the color, not the data, is compressed. (With
+    `summary_top_n` at its default of 5, at most 5 distinct suspects compete
+    for the 8 slots, so this fits comfortably; a pathological case — more
+    distinct suspect entities than color slots — is not specially handled
+    beyond "some suspects also fold into Other," same as any other entity.)
 - Marker ≥8px with a 2px surface-color ring.
 - Horizontal dashed reference line at `config.spec_threshold`, status
   **critical** color (`#d03b3b`), directly annotated "Spec limit: {value}".
-- Legend shows color groups (omitted entirely for a single group — the panel
-  header already names the suspect); one caption under the chart explains
-  the shape convention once ("○ within spec · ◆ above spec limit"), since
-  that meaning is constant across every panel.
+- Legend shows color groups, with the suspect's entry text-suffixed
+  `"(suspect)"` (e.g. `"ToolA / ChamberX (suspect)"`) so it's identifiable
+  without a dedicated color/shape channel — text carries this, not a new
+  visual channel. Omitted entirely only when there's a single group (the
+  panel header already names the suspect in that case). One caption under
+  the chart explains the shape convention once ("○ within spec · ◆ above
+  spec limit"), since that meaning is constant across every panel.
 - Hover tooltip: `WaferID` and `NCE_Value` lead, then time, group, status.
 - No trend/CUSUM overlay.
 
@@ -250,14 +280,20 @@ Add to `[project.dependencies]`: `plotly`.
 
 - `tests/test_root_cause_base.py`: `resolve_detail_history` for all three
   branches (chuck-composite filter, tool-with-free-chuck, upstream
-  tool-vs-chamber granularity), the rework-dedup path, and the missing
-  `group_label` → `"UNKNOWN"` fallback.
+  tool-vs-chamber granularity), the rework-dedup path, the missing
+  `group_label` → `"UNKNOWN"` fallback, and — for the upstream branch —
+  that rows from a non-suspect Tool/Chamber at the same `Pre_StepID` are
+  included with `is_suspect_group == False` while the suspect's own rows
+  have `is_suspect_group == True`.
 - `tests/test_majority_rule.py`: new case for the `(ToolID, ChuckID)`
   composite-counting fix (same `ChuckID` split across two tools).
 - `tests/test_chart_board.py` (new): `render_chart_board` against a small
   synthetic `AnalysisResult` + `long_df` — asserts the returned string
   contains one sidebar entry per `Summary` item (not per `Details` item),
-  the `spec_threshold` value, plotly.js embedded exactly once, and doesn't
-  crash on an empty `Summary`.
+  the `spec_threshold` value, plotly.js embedded exactly once, doesn't
+  crash on an empty `Summary`, the suspect's `group_label` always lands in
+  a real color slot (never folded into "Other") when more than 8 combos
+  are present at one step, and the suspect's legend entry carries the
+  `"(suspect)"` suffix.
 - `tests/test_cli.py`: `--chart-board` writes a non-empty HTML file;
   combinable with `--output` in the same invocation.
