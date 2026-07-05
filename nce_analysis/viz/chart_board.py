@@ -114,16 +114,17 @@ def _assign_global_colors(
     other_labels.sort(key=lambda label: (-wafer_counts[label], first_seen_order.index(label)))
 
     ordered_labels = suspect_labels + other_labels
-    return {label: _CATEGORICAL_COLORS[i] for i, label in enumerate(ordered_labels[:8])}
+    n_slots = len(_CATEGORICAL_COLORS)
+    return {label: _CATEGORICAL_COLORS[i] for i, label in enumerate(ordered_labels[:n_slots])}
 
 
 def _add_marker_trace(fig: go.Figure, sub_df: pd.DataFrame, color: str, legend_name: str) -> None:
     symbols = ["diamond" if a else "circle" for a in sub_df["is_anomaly"]]
     status = ["above spec limit" if a else "within spec" for a in sub_df["is_anomaly"]]
-    customdata = list(zip(sub_df["WaferID"], sub_df["group_label"], status))
+    customdata = list(zip(sub_df["WaferID"], sub_df["group_label"], status, sub_df["time"]))
     fig.add_trace(
         go.Scatter(
-            x=sub_df["time"],
+            x=[sub_df["group_label"], sub_df["time"]],
             y=sub_df["NCE_Value"],
             mode="markers",
             name=legend_name,
@@ -137,7 +138,7 @@ def _add_marker_trace(fig: go.Figure, sub_df: pd.DataFrame, color: str, legend_n
             hovertemplate=(
                 "WaferID: %{customdata[0]}<br>"
                 "NCE_Value: %{y}<br>"
-                "Time: %{x}<br>"
+                "Time: %{customdata[3]}<br>"
                 "Group: %{customdata[1]}<br>"
                 "Status: %{customdata[2]}<extra></extra>"
             ),
@@ -190,7 +191,7 @@ def _spc_chart_fragment(
         plot_bgcolor=_SURFACE_RING_COLOR,
         paper_bgcolor=_SURFACE_RING_COLOR,
     )
-    fig.update_xaxes(title_text="Time")
+    fig.update_xaxes(title_text="Group / Time")
     fig.update_yaxes(title_text="NCE_Value")
 
     chart_html = embedder.to_html(fig)
