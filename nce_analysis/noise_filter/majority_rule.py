@@ -27,9 +27,9 @@ class MajorityRule(NoiseFilterStrategy):
                 surviving_rows.append(hotspot)
                 continue
 
-            combo_counts = anomalous.groupby(["ToolID", "ChuckID"]).size().sort_values(
-                ascending=False
-            )
+            combo_counts = pd.Series(
+                list(zip(anomalous["ToolID"], anomalous["ChuckID"]))
+            ).value_counts()
             (owning_tool, top_chuck), chuck_n = combo_counts.index[0], combo_counts.iloc[0]
             chuck_share = chuck_n / total_anomalous
 

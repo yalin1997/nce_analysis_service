@@ -52,7 +52,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
-        result = pipeline.run(raw_df, config)
+        long_df = WideHistoryReshape().transform(raw_df) if args.chart_board else None
+        result = pipeline.run(raw_df, config, preprocessed_long_df=long_df)
     except PreprocessingError as e:
         print(f"Error running analysis pipeline: {e}", file=sys.stderr)
         return 1
@@ -64,7 +65,6 @@ def main(argv: list[str] | None = None) -> int:
         print(output_json)
 
     if args.chart_board:
-        long_df = WideHistoryReshape().transform(raw_df)
         chart_html = render_chart_board(result, long_df, config)
         args.chart_board.write_text(chart_html, encoding="utf-8")
 

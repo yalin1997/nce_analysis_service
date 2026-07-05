@@ -77,6 +77,36 @@ def test_explode_raises_when_a_point_is_missing_a_required_field():
         explode_measurement_points(raw_df)
 
 
+def test_explode_raises_preprocessing_error_when_a_point_is_none():
+    raw_df = pd.DataFrame(
+        [
+            {
+                "WaferID": "W1",
+                "ToolID": "LITHO_01",
+                "Measurement_Points": [None],
+            }
+        ]
+    )
+
+    with pytest.raises(PreprocessingError, match="W1"):
+        explode_measurement_points(raw_df)
+
+
+def test_explode_raises_preprocessing_error_when_a_point_is_not_a_dict():
+    raw_df = pd.DataFrame(
+        [
+            {
+                "WaferID": "W1",
+                "ToolID": "LITHO_01",
+                "Measurement_Points": ["not_a_dict"],
+            }
+        ]
+    )
+
+    with pytest.raises(PreprocessingError, match="W1"):
+        explode_measurement_points(raw_df)
+
+
 def test_discover_history_levels_finds_all_levels():
     columns = [
         "WaferID",

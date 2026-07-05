@@ -120,6 +120,29 @@ def test_main_chart_board_combinable_with_output(tmp_path):
     assert len(chart_path.read_text(encoding="utf-8")) > 0
 
 
+def test_main_chart_board_reuses_single_preprocessing_pass(tmp_path, monkeypatch):
+    csv_path = tmp_path / "data.csv"
+    chart_path = tmp_path / "chart_board.html"
+    _write_minimal_csv(csv_path)
+
+    from nce_analysis.preprocessing.wide_history_reshape import WideHistoryReshape
+
+    call_count = 0
+    original_transform = WideHistoryReshape.transform
+
+    def counting_transform(self, raw_df):
+        nonlocal call_count
+        call_count += 1
+        return original_transform(self, raw_df)
+
+    monkeypatch.setattr(WideHistoryReshape, "transform", counting_transform)
+
+    exit_code = main(["--input", str(csv_path), "--chart-board", str(chart_path)])
+
+    assert exit_code == 0
+    assert call_count == 1
+
+
 def test_main_reports_error_for_preprocessing_failure(tmp_path, capsys):
     csv_path = tmp_path / "data.csv"
     # No Pre_*_i history columns at all -> discover_history_levels finds

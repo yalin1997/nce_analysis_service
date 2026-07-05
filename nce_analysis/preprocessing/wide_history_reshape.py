@@ -50,6 +50,11 @@ def explode_measurement_points(raw_df: pd.DataFrame) -> pd.DataFrame:
     kept = raw_df[has_points]
     for wafer_id, points in zip(kept["WaferID"], kept["Measurement_Points"]):
         for point in points:
+            if not isinstance(point, dict):
+                raise PreprocessingError(
+                    f"Wafer {wafer_id} has a malformed Measurement_Points entry "
+                    f"(expected a dict, got {type(point).__name__}): {point!r}"
+                )
             missing = [field for field in _REQUIRED_POINT_FIELDS if field not in point]
             if missing:
                 raise PreprocessingError(

@@ -155,6 +155,59 @@ def test_chuck_id_shared_across_tools_does_not_falsely_trigger_chuck_majority():
     assert len(result.litho_self_issues) == 0
 
 
+def test_chuck_majority_tie_breaks_by_first_occurrence_not_alphabetical():
+    # LITHO_B/CHK_1 appears first in the data; LITHO_A/CHK_2 appears second
+    # but sorts first alphabetically. On a genuine count tie the first
+    # combo encountered should win, not the alphabetically-first one.
+    long_df = pd.DataFrame(
+        [
+            {
+                "WaferID": "W0",
+                "X_Posi": 0.0,
+                "Y_Posi": 0.0,
+                "NCE_Value": 20.0,
+                "ToolID": "LITHO_B",
+                "ChuckID": "CHK_1",
+                "StageID": "LITHO_M1",
+            },
+            {
+                "WaferID": "W1",
+                "X_Posi": 0.0,
+                "Y_Posi": 0.0,
+                "NCE_Value": 20.0,
+                "ToolID": "LITHO_B",
+                "ChuckID": "CHK_1",
+                "StageID": "LITHO_M1",
+            },
+            {
+                "WaferID": "W2",
+                "X_Posi": 0.0,
+                "Y_Posi": 0.0,
+                "NCE_Value": 20.0,
+                "ToolID": "LITHO_A",
+                "ChuckID": "CHK_2",
+                "StageID": "LITHO_M1",
+            },
+            {
+                "WaferID": "W3",
+                "X_Posi": 0.0,
+                "Y_Posi": 0.0,
+                "NCE_Value": 20.0,
+                "ToolID": "LITHO_A",
+                "ChuckID": "CHK_2",
+                "StageID": "LITHO_M1",
+            },
+        ]
+    )
+    hotspots = _hotspots([(0.0, 0.0)])
+    config = AnalysisConfig(noise_filter_majority_threshold=0.3)
+
+    result = MajorityRule().filter(long_df, hotspots, config)
+
+    assert result.litho_self_issues[0].Suspect_Pre_ToolID == "LITHO_B"
+    assert result.litho_self_issues[0].Suspect_Pre_ChamberID == "CHK_1"
+
+
 def test_no_majority_survives_to_root_cause_analysis():
     long_df = pd.DataFrame(
         [

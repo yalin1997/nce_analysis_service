@@ -28,16 +28,27 @@ _DRIFT_STRATEGIES = {
 }
 
 
-def run(raw_df: pd.DataFrame, config: AnalysisConfig | None = None) -> AnalysisResult:
+def run(
+    raw_df: pd.DataFrame,
+    config: AnalysisConfig | None = None,
+    *,
+    preprocessed_long_df: pd.DataFrame | None = None,
+) -> AnalysisResult:
+    """preprocessed_long_df: pass an already-computed WideHistoryReshape
+    output (e.g. one the caller also needs for chart_board.render_chart_board)
+    to skip re-running preprocessing here."""
     config = config or AnalysisConfig()
 
-    preprocessor = WideHistoryReshape()
     hotspot_detector = RatioThreshold()
     noise_filter = MajorityRule()
     root_cause_strategy = _ROOT_CAUSE_STRATEGIES[config.root_cause_strategy]()
     drift_strategy = _DRIFT_STRATEGIES[config.drift_strategy]()
 
-    long_df = preprocessor.transform(raw_df)
+    long_df = (
+        preprocessed_long_df
+        if preprocessed_long_df is not None
+        else WideHistoryReshape().transform(raw_df)
+    )
     hotspots = hotspot_detector.detect(long_df, config)
 
     if hotspots.empty:

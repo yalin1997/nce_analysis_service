@@ -70,7 +70,10 @@ def _resolve_litho_self_history(
     stage_ids = set(long_df.loc[own_mask & coord_mask, "StageID"].unique())
 
     scope = long_df[long_df["StageID"].isin(stage_ids) & coord_mask].copy()
-    scope = scope.drop_duplicates(subset=["WaferID", "X_Posi", "Y_Posi"])
+    scope = (
+        scope.sort_values("Execute_Time")
+        .drop_duplicates(subset=["WaferID", "X_Posi", "Y_Posi"], keep="last")
+    )
     scope["is_anomaly"] = scope["NCE_Value"] > config.spec_threshold
 
     if detail.Root_Cause_Type == "LITHO_TOOL_ISSUE":
@@ -96,11 +99,16 @@ def _resolve_litho_self_history(
 def _resolve_upstream_history(
     long_df: pd.DataFrame, detail: RootCauseDetail, config: AnalysisConfig, coord_mask: pd.Series
 ) -> pd.DataFrame:
-    step_mask = long_df["Pre_StepID"] == detail.Suspect_Pre_StepID
+    # fillna mirrors pipeline.py's NaN->"UNKNOWN" Pre_StepID substitution so a
+    # detail keyed on the "UNKNOWN" sentinel still matches raw NaN rows here
+    # (this long_df may come straight from WideHistoryReshape, unlike
+    # pipeline.py's already-filled point_rows).
+    step_ids = long_df["Pre_StepID"].fillna("UNKNOWN")
+    step_mask = step_ids == detail.Suspect_Pre_StepID
     scope = (
         long_df[step_mask & coord_mask]
         .sort_values("Pre_Execute_Time")
-        .drop_duplicates(subset=["WaferID"], keep="last")
+        .drop_duplicates(subset=["WaferID", "X_Posi", "Y_Posi"], keep="last")
         .copy()
     )
     scope["is_anomaly"] = scope["NCE_Value"] > config.spec_threshold

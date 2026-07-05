@@ -176,6 +176,23 @@ def test_render_chart_board_flagged_coordinate_appears_in_table_toggle():
     assert "9.0" in html
 
 
+def test_assign_global_colors_slot_bound_tracks_palette_length(monkeypatch):
+    from nce_analysis.viz import chart_board
+
+    monkeypatch.setattr(chart_board, "_CATEGORICAL_COLORS", ["#111111", "#222222", "#333333"])
+
+    resolved = pd.DataFrame(
+        {
+            "group_label": ["A", "B", "C", "D", "E"],
+            "is_suspect_group": [False, False, False, False, False],
+        }
+    )
+
+    color_map = chart_board._assign_global_colors([], [resolved])
+
+    assert len(color_map) == 3
+
+
 def test_render_chart_board_resolve_history_empty_renders_text_note_not_chart():
     detail = _detail(Suspect_Pre_StepID="NONEXISTENT_STEP")
     result = _result(details=[detail], summary=[detail])

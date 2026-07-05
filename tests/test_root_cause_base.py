@@ -422,6 +422,103 @@ def test_resolve_detail_history_chuck_contamination_recovers_both_stages():
     assert set(result["WaferID"]) == {"W1", "W2", "W3", "W4"}
 
 
+def test_resolve_detail_history_upstream_matches_unfilled_nan_step_id_against_unknown():
+    # Mirrors pipeline.py's fillna(Pre_StepID, "UNKNOWN") before grouping: a
+    # detail keyed on the sentinel "UNKNOWN" must still match rows where
+    # Pre_StepID is still raw NaN (as it is in the CLI chart-board path,
+    # which reconstructs long_df without pipeline's fillna step).
+    long_df = pd.DataFrame(
+        [
+            {
+                "WaferID": "W1",
+                "X_Posi": 0.0,
+                "Y_Posi": 0.0,
+                "NCE_Value": 20.0,
+                "Pre_ToolID": "CMP_01",
+                "Pre_ChamberID": "ChamberA",
+                "Pre_StepID": pd.NA,
+                "Pre_Execute_Time": "2025-01-01",
+            }
+        ]
+    )
+    detail = _upstream_detail(Suspect_Pre_StepID="UNKNOWN")
+    config = AnalysisConfig()
+
+    result = resolve_detail_history(long_df, detail, config)
+
+    assert set(result["WaferID"]) == {"W1"}
+
+
+def test_resolve_detail_history_upstream_dedupes_by_wafer_and_coordinate():
+    # A detail spanning two merged coordinates where the same wafer appears
+    # anomalous at both must keep both data points, not collapse to one.
+    long_df = pd.DataFrame(
+        [
+            {
+                "WaferID": "W1",
+                "X_Posi": 0.0,
+                "Y_Posi": 0.0,
+                "NCE_Value": 20.0,
+                "Pre_ToolID": "CMP_01",
+                "Pre_ChamberID": "ChamberA",
+                "Pre_StepID": "STEP1",
+                "Pre_Execute_Time": "2025-01-01",
+            },
+            {
+                "WaferID": "W1",
+                "X_Posi": 5.0,
+                "Y_Posi": 5.0,
+                "NCE_Value": 30.0,
+                "Pre_ToolID": "CMP_01",
+                "Pre_ChamberID": "ChamberA",
+                "Pre_StepID": "STEP1",
+                "Pre_Execute_Time": "2025-01-01",
+            },
+        ]
+    )
+    detail = _upstream_detail(Affected_Coordinates=[(0.0, 0.0), (5.0, 5.0)])
+    config = AnalysisConfig()
+
+    result = resolve_detail_history(long_df, detail, config)
+
+    assert len(result) == 2
+    assert set(result["NCE_Value"]) == {20.0, 30.0}
+
+
+def test_resolve_detail_history_self_branch_dedupes_keeping_latest_rework():
+    long_df = pd.DataFrame(
+        [
+            {
+                "WaferID": "W1",
+                "X_Posi": 0.0,
+                "Y_Posi": 0.0,
+                "NCE_Value": 5.0,
+                "ToolID": "LITHO_A",
+                "ChuckID": "CHK_1",
+                "StageID": "LITHO_M1",
+                "Execute_Time": "2026-01-01",
+            },
+            {
+                "WaferID": "W1",
+                "X_Posi": 0.0,
+                "Y_Posi": 0.0,
+                "NCE_Value": 20.0,
+                "ToolID": "LITHO_A",
+                "ChuckID": "CHK_1",
+                "StageID": "LITHO_M1",
+                "Execute_Time": "2026-02-01",
+            },
+        ]
+    )
+    detail = _litho_self_detail(Root_Cause_Type="LITHO_CHUCK_ISSUE")
+    config = AnalysisConfig()
+
+    result = resolve_detail_history(long_df, detail, config)
+
+    assert len(result) == 1
+    assert result.iloc[0]["NCE_Value"] == 20.0
+
+
 def test_resolve_detail_history_self_branch_dedupes_by_wafer_coordinate():
     long_df = pd.DataFrame(
         [
