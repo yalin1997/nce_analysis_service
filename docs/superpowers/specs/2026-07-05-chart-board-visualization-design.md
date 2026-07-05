@@ -94,46 +94,65 @@ def resolve_detail_history(
     is_suspect_group."""
 ```
 
-Behavior branches on `detail.Root_Cause_Type`. For the two LITHO-self types,
-the **filtered (fixed) dimension** is whatever the original classification
-actually keyed on; the **remaining (free) dimension** becomes `group_label`
-so the chart can still show real variation instead of a meaningless
-single-color group. For the upstream types, the filter is deliberately
-*broader than the suspect* — see rationale below the table:
+Behavior branches on `detail.Root_Cause_Type`, but every branch now follows
+the same shape ("Tool/Chuck 排排站" — line the candidates up side by side):
+filter down to a **comparison scope** (same process step for upstream, same
+`StageID` for LITHO-self), then **tag** which rows are the suspect's own via
+an `is_suspect_group` boolean column, rather than filtering the chart down
+to only the suspect. `group_label` is the full identity of every comparison
+unit in scope, so each one gets its own color (§5) instead of being
+collapsed into the suspect alone:
 
-| Root_Cause_Type | Filter | `group_label` | time axis |
+| Root_Cause_Type | Comparison scope | `group_label` | time axis |
 |---|---|---|---|
-| `LITHO_CHUCK_ISSUE` / `_CONTAMINATION` | `ToolID == Suspect_Pre_ToolID` **and** `ChuckID == Suspect_Pre_ChamberID` (composite — see rationale below) | none (both dims pinned) — single group | `Execute_Time` |
-| `LITHO_TOOL_ISSUE` | `ToolID == Suspect_Pre_ToolID` | `ChuckID` (chuck was never considered for this classification, `Suspect_Pre_ChamberID` is `"N/A"`) | `Execute_Time` |
-| `SPECIFIC_CHAMBER_DEFECT` / `CHAMBER_DRIFT` / `CHAMBER_SUDDEN_SHIFT` | `Pre_StepID == Suspect_Pre_StepID` only — **every** Tool(+Chamber) at that process step, not just the suspect | every distinct `Pre_ToolID` (`granularity == "tool"`) or `Pre_ToolID\|Pre_ChamberID` combo (`granularity == "chamber"`) present in the group | `Pre_Execute_Time` |
+| `LITHO_CHUCK_ISSUE` / `_CONTAMINATION` | same `StageID`(s) as the suspect's own rows (recovered internally — see below) **and** `X_Posi/Y_Posi ∈ Affected_Coordinates` | every distinct `ToolID\|ChuckID` combo present | `Execute_Time` |
+| `LITHO_TOOL_ISSUE` | same `StageID`(s) as the suspect's own rows **and** `X_Posi/Y_Posi ∈ Affected_Coordinates` | every distinct `ToolID\|ChuckID` combo present | `Execute_Time` |
+| `SPECIFIC_CHAMBER_DEFECT` / `CHAMBER_DRIFT` / `CHAMBER_SUDDEN_SHIFT` | `Pre_StepID == Suspect_Pre_StepID` **and** `X_Posi/Y_Posi ∈ Affected_Coordinates` | every distinct `Pre_ToolID` (`granularity == "tool"`) or `Pre_ToolID\|Pre_ChamberID` combo (`granularity == "chamber"`) present | `Pre_Execute_Time` |
 
-All branches first filter to `X_Posi/Y_Posi ∈ detail.Affected_Coordinates`
-and dedupe by `(WaferID, X_Posi, Y_Posi)` (LITHO-self branch, matching
-`majority_rule.py`) or by `WaferID` keeping the latest timestamp (upstream
-branch, matching `pipeline.py`'s rework handling) before computing
+All branches dedupe by `(WaferID, X_Posi, Y_Posi)` (LITHO-self branch,
+matching `majority_rule.py`) or by `WaferID` keeping the latest timestamp
+(upstream branch, matching `pipeline.py`'s rework handling) before computing
 `is_anomaly = NCE_Value > config.spec_threshold`.
 
-**Why the upstream branch shows every combo at that step, not just the
-suspect:** the point of the chart is to visually confirm the recommended
-Tool/Chamber's `NCE_Value` trend is actually worse than its peers at the
-same process step — that comparison is impossible if the chart only ever
-shows the suspect in isolation. `matches_suspect(long_df, candidate, config)`
-still runs here, but as a **tag**, not a filter: it produces the
-`is_suspect_group` boolean column so the render layer (§5) knows which rows
-are the suspect's own, without re-deriving the granularity decision. The
-`X_Posi/Y_Posi ∈ detail.Affected_Coordinates` restriction still applies to
-every row, suspect and peers alike — the comparison is "same physical
-coordinate, different upstream machine," not different coordinates
-entirely, otherwise location-driven variation would be conflated with
-machine-driven variation.
+**`is_suspect_group` tagging, per branch:**
+- `LITHO_CHUCK_ISSUE` / `_CONTAMINATION`: `ToolID == Suspect_Pre_ToolID` **and** `ChuckID == Suspect_Pre_ChamberID`.
+- `LITHO_TOOL_ISSUE`: `ToolID == Suspect_Pre_ToolID`.
+- Upstream types: `matches_suspect(long_df, candidate, config)` (reuses the
+  existing granularity decision rather than re-deriving it).
 
-**Why the chuck branch filters on `ToolID` *and* `ChuckID` together, not
-`ChuckID` alone:** `ChuckID` is only unique *within* a LITHO tool (each tool
-has its own Chuck "1"/"2" — conceptually the same role `ChamberID` plays
-upstream, just named differently). Filtering by `ChuckID` alone would pull
-in every other tool's Chuck "1"/"2" too. Since `Suspect_Pre_ToolID` for these
-types is already the derived owning-tool value recorded on the detail, the
-composite filter is available for free.
+**Recovering the `StageID` comparison scope for LITHO-self branches:**
+unlike the upstream branches, `RootCauseDetail` carries no field for the
+wafer's own `StageID` — only the `Pre_*` history is stored. `resolve_detail_history`
+recovers it in two passes: first apply the narrow `is_suspect_group`
+condition above (restricted to `Affected_Coordinates`) to find the suspect's
+own rows, collect the distinct `StageID` values among them, then broaden the
+final filter to `StageID ∈ that set` (dropping the `ToolID`/`ChuckID`
+restriction, keeping the coordinate restriction). This is normally a single
+`StageID`; it is more than one specifically for the `_CONTAMINATION` case,
+where the suspect chuck's own anomalies are already known (via
+`majority_rule.py`'s `stage_diversity` check) to span multiple `StageID`s —
+the broadened comparison then naturally includes peer Tool/Chuck combos
+from every one of those stages, not just one.
+
+**Why the chuck tag/recovery filters on `ToolID` *and* `ChuckID` together,
+not `ChuckID` alone:** `ChuckID` is only unique *within* a LITHO tool (each
+tool has its own Chuck "1"/"2" — conceptually the same role `ChamberID`
+plays upstream, just named differently). Using `ChuckID` alone — whether to
+tag the suspect or to recover its `StageID`(s) — would pull in every other
+tool's Chuck "1"/"2" too, corrupting both the tag and the recovered scope.
+Since `Suspect_Pre_ToolID` for these types is already the derived
+owning-tool value recorded on the detail, the composite check is available
+for free.
+
+**Why the upstream branch's comparison scope is every combo at that step,
+not just the suspect:** the point of the chart is to visually confirm the
+recommended Tool/Chamber's `NCE_Value` trend is actually worse than its
+peers at the same process step — impossible if the chart only ever shows
+the suspect in isolation. The `X_Posi/Y_Posi ∈ detail.Affected_Coordinates`
+restriction still applies to every row, suspect and peers alike — the
+comparison is "same physical coordinate, different upstream machine," not
+different coordinates entirely, otherwise location-driven variation would
+be conflated with machine-driven variation.
 
 **Bundled fix — `noise_filter/majority_rule.py`:** this same ambiguity
 exists one level up, in how the suspect is *decided* in the first place.
@@ -170,9 +189,10 @@ every `Details` entry)
   (in-spec vs. anomalous) are different jobs, so they go on two different
   channels rather than colliding on one hue:
   - **Hue** (categorical, fixed 8-slot order: blue/aqua/yellow/green/violet/
-    red/magenta/orange) = `group_label`. For LITHO-self panels, typically
-    1–2 distinct values (per §4's fixed/free split). For upstream panels,
-    potentially many — every Tool(+Chamber) sharing that process step.
+    red/magenta/orange) = `group_label`. Potentially many distinct values in
+    every panel now — every Tool/Chuck sharing the suspect's `StageID`
+    (LITHO-self panels) or every Tool(+Chamber) sharing that process step
+    (upstream panels), not just the suspect alone.
   - **Shape** = anomaly status: circle = within spec, diamond =
     `NCE_Value > spec_threshold`.
   - Colors are assigned **once, globally, across every panel in the report**
@@ -279,12 +299,19 @@ Add to `[project.dependencies]`: `plotly`.
 ## 9. Testing Plan
 
 - `tests/test_root_cause_base.py`: `resolve_detail_history` for all three
-  branches (chuck-composite filter, tool-with-free-chuck, upstream
-  tool-vs-chamber granularity), the rework-dedup path, the missing
-  `group_label` → `"UNKNOWN"` fallback, and — for the upstream branch —
-  that rows from a non-suspect Tool/Chamber at the same `Pre_StepID` are
-  included with `is_suspect_group == False` while the suspect's own rows
-  have `is_suspect_group == True`.
+  branches, the rework-dedup path, and the missing `group_label` →
+  `"UNKNOWN"` fallback. Per branch:
+  - Upstream (tool-vs-chamber granularity): rows from a non-suspect
+    Tool/Chamber at the same `Pre_StepID` are included with
+    `is_suspect_group == False` while the suspect's own rows have
+    `is_suspect_group == True`.
+  - `LITHO_CHUCK_ISSUE`/`LITHO_TOOL_ISSUE`: peer Tool/Chuck combos sharing
+    the suspect's recovered `StageID` are included and correctly tagged
+    `is_suspect_group == False`; a combo at a *different* `StageID` (even
+    at the same coordinate) is excluded.
+  - `LITHO_CHUCK_CONTAMINATION`: the suspect's own rows span two distinct
+    `StageID`s — asserts both are recovered and peer combos from *both*
+    stages appear in the result, not just one.
 - `tests/test_majority_rule.py`: new case for the `(ToolID, ChuckID)`
   composite-counting fix (same `ChuckID` split across two tools).
 - `tests/test_chart_board.py` (new): `render_chart_board` against a small
