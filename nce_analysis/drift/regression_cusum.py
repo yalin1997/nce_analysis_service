@@ -17,6 +17,9 @@ class RegressionCusum(DriftStrategy):
         ).to_numpy()
         values = ordered["NCE_Value"].to_numpy()
 
+        if np.unique(elapsed_hours).size < 2:
+            return "SPECIFIC_CHAMBER_DEFECT", {"insufficient_time_variation": 1.0}
+
         slope, intercept, _, p_value, _ = stats.linregress(elapsed_hours, values)
         fitted = intercept + slope * elapsed_hours
         residuals = values - fitted

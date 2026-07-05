@@ -9,6 +9,7 @@ from nce_analysis.hotspot.ratio_threshold import RatioThreshold
 from nce_analysis.noise_filter.majority_rule import MajorityRule
 from nce_analysis.preprocessing.wide_history_reshape import WideHistoryReshape
 from nce_analysis.result import aggregate_results
+from nce_analysis.root_cause.base import matches_suspect
 from nce_analysis.root_cause.both import BothStrategy
 from nce_analysis.root_cause.ml import MLStrategy
 from nce_analysis.root_cause.statistical import StatisticalStrategy
@@ -95,10 +96,7 @@ def run(raw_df: pd.DataFrame, config: AnalysisConfig | None = None) -> AnalysisR
             candidates = root_cause_strategy.analyze(litho_points, config)
 
             for candidate in candidates:
-                combo_history = litho_points[
-                    (litho_points["Pre_ToolID"] == candidate.suspect_tool_id)
-                    & (litho_points["Pre_ChamberID"] == candidate.suspect_chamber_id)
-                ]
+                combo_history = litho_points[matches_suspect(litho_points, candidate, config)]
 
                 if len(combo_history) < 3:
                     root_cause_type = "SPECIFIC_CHAMBER_DEFECT"

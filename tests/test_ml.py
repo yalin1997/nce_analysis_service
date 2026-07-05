@@ -25,6 +25,23 @@ def test_analyze_identifies_top_contributing_combo():
     assert result[0].confidence_score > 0
 
 
+def test_analyze_can_identify_top_contributing_tool_without_chamber_granularity():
+    rows = []
+    for i in range(30):
+        rows.append({"Pre_ToolID": "CMP_01", "Pre_ChamberID": "ChamberA", "is_anomaly": i < 27})
+    for i in range(30):
+        rows.append({"Pre_ToolID": "CMP_02", "Pre_ChamberID": "ChamberB", "is_anomaly": i < 3})
+    group_df = pd.DataFrame(rows)
+    config = AnalysisConfig(root_cause_granularity="tool")
+
+    result = MLStrategy().analyze(group_df, config)
+
+    assert len(result) == 1
+    assert result[0].suspect_tool_id == "CMP_01"
+    assert result[0].suspect_chamber_id == "N/A"
+    assert result[0].confidence_score > 0
+
+
 def test_analyze_returns_empty_with_single_combo():
     group_df = pd.DataFrame(
         [

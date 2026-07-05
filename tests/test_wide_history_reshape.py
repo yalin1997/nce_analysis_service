@@ -60,6 +60,23 @@ def test_explode_raises_when_all_wafers_have_empty_measurement_points():
         explode_measurement_points(raw_df)
 
 
+def test_explode_raises_when_a_point_is_missing_a_required_field():
+    raw_df = pd.DataFrame(
+        [
+            {
+                "WaferID": "W1",
+                "ToolID": "LITHO_01",
+                "Measurement_Points": [
+                    {"X_Posi": 0.0, "Y_Posi": 0.0},
+                ],
+            }
+        ]
+    )
+
+    with pytest.raises(PreprocessingError, match="W1"):
+        explode_measurement_points(raw_df)
+
+
 def test_discover_history_levels_finds_all_levels():
     columns = [
         "WaferID",

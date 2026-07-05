@@ -42,3 +42,18 @@ def test_classify_detects_stable_defect_with_no_trend():
     root_cause_type, _ = RegressionCusum().classify(series_df, config)
 
     assert root_cause_type == "SPECIFIC_CHAMBER_DEFECT"
+
+
+def test_classify_handles_constant_timestamps_without_nan_metrics():
+    n = 5
+    same_time = pd.Timestamp("2026-01-01")
+    series_df = pd.DataFrame(
+        {"Pre_Execute_Time": [same_time] * n, "NCE_Value": [10.0, 12.0, 11.0, 13.0, 9.0]}
+    )
+    config = AnalysisConfig(alpha=0.05)
+
+    root_cause_type, metrics = RegressionCusum().classify(series_df, config)
+
+    assert root_cause_type == "SPECIFIC_CHAMBER_DEFECT"
+    assert metrics["insufficient_time_variation"] == 1.0
+    assert not any(value != value for value in metrics.values())

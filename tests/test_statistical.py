@@ -27,6 +27,18 @@ def test_analyze_identifies_significant_combo():
     assert result[0].confidence_score > 90
 
 
+def test_analyze_can_identify_significant_tool_without_chamber_granularity():
+    group_df = _group_df_with_significant_combo()
+    config = AnalysisConfig(alpha=0.05, root_cause_granularity="tool")
+
+    result = StatisticalStrategy().analyze(group_df, config)
+
+    assert len(result) == 1
+    assert result[0].suspect_tool_id == "CMP_01"
+    assert result[0].suspect_chamber_id == "N/A"
+    assert result[0].confidence_score > 90
+
+
 def test_analyze_returns_empty_when_no_significant_association():
     rows = []
     for combo_tool, combo_chamber in [("CMP_01", "ChamberA"), ("CMP_02", "ChamberB")]:

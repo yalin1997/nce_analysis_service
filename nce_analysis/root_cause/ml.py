@@ -4,7 +4,12 @@ from sklearn.preprocessing import OneHotEncoder
 from sklearn.tree import DecisionTreeClassifier
 
 from nce_analysis.config import AnalysisConfig
-from nce_analysis.root_cause.base import RootCauseCandidate, RootCauseStrategy
+from nce_analysis.root_cause.base import (
+    RootCauseCandidate,
+    RootCauseStrategy,
+    build_suspect_key,
+    split_suspect_key,
+)
 
 
 class MLStrategy(RootCauseStrategy):
@@ -12,13 +17,13 @@ class MLStrategy(RootCauseStrategy):
         self, group_df: pd.DataFrame, config: AnalysisConfig
     ) -> list[RootCauseCandidate]:
         working = group_df.copy()
-        working["combo"] = working["Pre_ToolID"] + "|" + working["Pre_ChamberID"]
+        working["suspect_key"] = build_suspect_key(working, config)
 
-        if working["combo"].nunique() < 2:
+        if working["suspect_key"].nunique() < 2:
             return []
 
         encoder = OneHotEncoder(sparse_output=False)
-        features = encoder.fit_transform(working[["combo"]])
+        features = encoder.fit_transform(working[["suspect_key"]])
         labels = working["is_anomaly"].astype(int).to_numpy()
 
         if labels.sum() == 0 or labels.sum() == len(labels):
@@ -39,21 +44,19 @@ class MLStrategy(RootCauseStrategy):
             positive_shap = shap_values
 
         # Per-feature means across the whole dataset cancel out for mutually
-        # exclusive one-hot columns (each column's positive and negative pushes
-        # balance to zero over a symmetric dataset), so combos are compared by
-        # each row's total SHAP push (summed across features) averaged within
-        # its own combo group instead.
+        # exclusive one-hot columns, so suspects are compared by each row's
+        # total SHAP push averaged within its own suspect group instead.
         row_contribution = positive_shap.sum(axis=1)
         working = working.assign(_row_contribution=row_contribution)
-        combo_means = working.groupby("combo")["_row_contribution"].mean()
+        suspect_means = working.groupby("suspect_key")["_row_contribution"].mean()
 
-        best_combo = combo_means.idxmax()
-        best_value = combo_means[best_combo]
+        best_suspect_key = suspect_means.idxmax()
+        best_value = suspect_means[best_suspect_key]
         if best_value <= 0:
             return []
 
-        tool_id, chamber_id = best_combo.split("|", 1)
-        positive_total = combo_means[combo_means > 0].sum()
+        tool_id, chamber_id = split_suspect_key(best_suspect_key, config)
+        positive_total = suspect_means[suspect_means > 0].sum()
         confidence_score = (best_value / positive_total) * 100 if positive_total > 0 else 0.0
 
         return [

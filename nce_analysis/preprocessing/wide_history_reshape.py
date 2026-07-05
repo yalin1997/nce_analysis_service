@@ -12,6 +12,7 @@ HISTORY_FIELD_NAMES = ["StageID", "StepID", "ToolID", "ChamberID", "Execute_Time
 _HISTORY_COLUMN_PATTERN = re.compile(
     r"^Pre_(StageID|StepID|ToolID|ChamberID|Execute_Time)_(\d+)$"
 )
+_REQUIRED_POINT_FIELDS = ("X_Posi", "Y_Posi", "NCE_Value")
 
 
 def discover_history_levels(columns) -> dict[int, dict[str, str]]:
@@ -47,6 +48,14 @@ def explode_measurement_points(raw_df: pd.DataFrame) -> pd.DataFrame:
             "nothing to analyze."
         )
     kept = raw_df[has_points]
+    for wafer_id, points in zip(kept["WaferID"], kept["Measurement_Points"]):
+        for point in points:
+            missing = [field for field in _REQUIRED_POINT_FIELDS if field not in point]
+            if missing:
+                raise PreprocessingError(
+                    f"Wafer {wafer_id} has a Measurement_Points entry missing "
+                    f"required field(s) {missing}: {point}"
+                )
     exploded = kept.explode("Measurement_Points", ignore_index=True)
     points = pd.json_normalize(exploded["Measurement_Points"].tolist())
     return pd.concat(

@@ -85,6 +85,22 @@ def test_pipeline_identifies_injected_root_cause():
     assert top.Requires_Manual_Review is False
 
 
+def test_pipeline_can_report_tool_level_root_cause():
+    raw_df = _build_batch()
+    config = AnalysisConfig(
+        root_cause_strategy="statistical",
+        root_cause_granularity="tool",
+        drift_strategy="regression_cusum",
+    )
+
+    result = pipeline.run(raw_df, config)
+
+    top = result.Summary[0]
+    assert top.Suspect_Pre_ToolID == "CMP_01"
+    assert top.Suspect_Pre_ChamberID == "N/A"
+    assert "insufficient_drift_sample" not in top.Metrics
+
+
 def test_pipeline_returns_empty_result_when_no_hotspots():
     raw_df = pd.DataFrame(
         [

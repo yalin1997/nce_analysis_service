@@ -27,14 +27,17 @@ class MajorityRule(NoiseFilterStrategy):
                 surviving_rows.append(hotspot)
                 continue
 
-            chuck_counts = anomalous["ChuckID"].value_counts()
-            top_chuck, chuck_n = chuck_counts.index[0], chuck_counts.iloc[0]
+            combo_counts = anomalous.groupby(["ToolID", "ChuckID"]).size().sort_values(
+                ascending=False
+            )
+            (owning_tool, top_chuck), chuck_n = combo_counts.index[0], combo_counts.iloc[0]
             chuck_share = chuck_n / total_anomalous
 
             if chuck_share > config.noise_filter_majority_threshold:
-                chuck_rows = anomalous[anomalous["ChuckID"] == top_chuck]
+                chuck_rows = anomalous[
+                    (anomalous["ToolID"] == owning_tool) & (anomalous["ChuckID"] == top_chuck)
+                ]
                 stage_diversity = chuck_rows["StageID"].nunique()
-                owning_tool = chuck_rows["ToolID"].mode().iloc[0]
                 root_cause_type = (
                     "LITHO_CHUCK_CONTAMINATION" if stage_diversity > 1 else "LITHO_CHUCK_ISSUE"
                 )

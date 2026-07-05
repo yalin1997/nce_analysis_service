@@ -88,6 +88,38 @@ def test_main_reports_error_for_invalid_config_field(tmp_path, capsys):
     assert "Error loading config file" in capsys.readouterr().err
 
 
+def test_main_writes_chart_board_html_when_flag_passed(tmp_path):
+    csv_path = tmp_path / "data.csv"
+    chart_path = tmp_path / "chart_board.html"
+    _write_minimal_csv(csv_path)
+
+    exit_code = main(["--input", str(csv_path), "--chart-board", str(chart_path)])
+
+    assert exit_code == 0
+    html = chart_path.read_text(encoding="utf-8")
+    assert len(html) > 0
+    assert "<html" in html.lower()
+
+
+def test_main_chart_board_combinable_with_output(tmp_path):
+    csv_path = tmp_path / "data.csv"
+    out_path = tmp_path / "result.json"
+    chart_path = tmp_path / "chart_board.html"
+    _write_minimal_csv(csv_path)
+
+    exit_code = main(
+        [
+            "--input", str(csv_path),
+            "--output", str(out_path),
+            "--chart-board", str(chart_path),
+        ]
+    )
+
+    assert exit_code == 0
+    assert json.loads(out_path.read_text())
+    assert len(chart_path.read_text(encoding="utf-8")) > 0
+
+
 def test_main_reports_error_for_preprocessing_failure(tmp_path, capsys):
     csv_path = tmp_path / "data.csv"
     # No Pre_*_i history columns at all -> discover_history_levels finds

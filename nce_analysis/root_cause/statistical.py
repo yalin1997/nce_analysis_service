@@ -3,7 +3,12 @@ from scipy.stats import chi2_contingency, fisher_exact
 from scipy.stats.contingency import expected_freq
 
 from nce_analysis.config import AnalysisConfig
-from nce_analysis.root_cause.base import RootCauseCandidate, RootCauseStrategy
+from nce_analysis.root_cause.base import (
+    RootCauseCandidate,
+    RootCauseStrategy,
+    build_suspect_key,
+    split_suspect_key,
+)
 
 
 class StatisticalStrategy(RootCauseStrategy):
@@ -11,9 +16,9 @@ class StatisticalStrategy(RootCauseStrategy):
         self, group_df: pd.DataFrame, config: AnalysisConfig
     ) -> list[RootCauseCandidate]:
         working = group_df.copy()
-        working["combo"] = working["Pre_ToolID"] + "|" + working["Pre_ChamberID"]
+        working["suspect_key"] = build_suspect_key(working, config)
 
-        contingency = pd.crosstab(working["combo"], working["is_anomaly"])
+        contingency = pd.crosstab(working["suspect_key"], working["is_anomaly"])
         # Use reindex (not `contingency[[True, False]]`) to select/order the
         # True/False columns: pandas treats a literal [True, False] list as a
         # boolean row mask rather than column labels, which silently drops or
@@ -37,25 +42,25 @@ class StatisticalStrategy(RootCauseStrategy):
         overall_anomaly_count = contingency[True].sum()
         overall_normal_count = contingency[False].sum()
 
-        best_combo = None
+        best_suspect_key = None
         best_p = 1.0
         best_odds_ratio = 0.0
-        for combo in contingency.index:
-            combo_anomaly = contingency.loc[combo, True]
-            combo_normal = contingency.loc[combo, False]
-            rest_anomaly = overall_anomaly_count - combo_anomaly
-            rest_normal = overall_normal_count - combo_normal
-            table = [[combo_anomaly, combo_normal], [rest_anomaly, rest_normal]]
+        for suspect_key in contingency.index:
+            suspect_anomaly = contingency.loc[suspect_key, True]
+            suspect_normal = contingency.loc[suspect_key, False]
+            rest_anomaly = overall_anomaly_count - suspect_anomaly
+            rest_normal = overall_normal_count - suspect_normal
+            table = [[suspect_anomaly, suspect_normal], [rest_anomaly, rest_normal]]
             odds_ratio, p_value = fisher_exact(table, alternative="greater")
             if p_value < best_p and odds_ratio > 1:
                 best_p = p_value
-                best_combo = combo
+                best_suspect_key = suspect_key
                 best_odds_ratio = odds_ratio
 
-        if best_combo is None or best_p >= config.alpha:
+        if best_suspect_key is None or best_p >= config.alpha:
             return []
 
-        tool_id, chamber_id = best_combo.split("|", 1)
+        tool_id, chamber_id = split_suspect_key(best_suspect_key, config)
         confidence_score = (1 - best_p) * 100
         metrics = {
             "p_value_combo": float(best_p),

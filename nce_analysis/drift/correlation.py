@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 from scipy import stats
 
@@ -15,6 +16,11 @@ class Correlation(DriftStrategy):
             (timestamps - timestamps.iloc[0]).dt.total_seconds() / 3600.0
         ).to_numpy()
         values = ordered["NCE_Value"].to_numpy()
+
+        if np.unique(elapsed_hours).size < 2:
+            return "SPECIFIC_CHAMBER_DEFECT", {"insufficient_time_variation": 1.0}
+        if np.unique(values).size < 2:
+            return "SPECIFIC_CHAMBER_DEFECT", {"insufficient_value_variation": 1.0}
 
         correlation, p_value = stats.pearsonr(elapsed_hours, values)
         metrics = {"correlation": float(correlation), "p_value": float(p_value)}

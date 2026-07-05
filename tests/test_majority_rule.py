@@ -82,6 +82,79 @@ def test_tool_majority_without_chuck_majority_classified_as_tool_issue():
     assert result.litho_self_issues[0].Suspect_Pre_ToolID == "LITHO_A"
 
 
+def test_chuck_id_shared_across_tools_does_not_falsely_trigger_chuck_majority():
+    # Same raw ChuckID ("CHK_1") appears under two different ToolIDs. Naive
+    # ChuckID.value_counts() would see CHK_1 at 4/6 (> 0.5) and misclassify
+    # this as a chuck majority; counting (ToolID, ChuckID) pairs correctly
+    # sees each individual pair at only 2/6, and no tool alone reaches
+    # majority either, so the hotspot should survive to root-cause analysis.
+    long_df = pd.DataFrame(
+        [
+            {
+                "WaferID": "W0",
+                "X_Posi": 0.0,
+                "Y_Posi": 0.0,
+                "NCE_Value": 20.0,
+                "ToolID": "LITHO_A",
+                "ChuckID": "CHK_1",
+                "StageID": "LITHO_M1",
+            },
+            {
+                "WaferID": "W1",
+                "X_Posi": 0.0,
+                "Y_Posi": 0.0,
+                "NCE_Value": 20.0,
+                "ToolID": "LITHO_A",
+                "ChuckID": "CHK_1",
+                "StageID": "LITHO_M1",
+            },
+            {
+                "WaferID": "W2",
+                "X_Posi": 0.0,
+                "Y_Posi": 0.0,
+                "NCE_Value": 20.0,
+                "ToolID": "LITHO_B",
+                "ChuckID": "CHK_1",
+                "StageID": "LITHO_M1",
+            },
+            {
+                "WaferID": "W3",
+                "X_Posi": 0.0,
+                "Y_Posi": 0.0,
+                "NCE_Value": 20.0,
+                "ToolID": "LITHO_B",
+                "ChuckID": "CHK_1",
+                "StageID": "LITHO_M1",
+            },
+            {
+                "WaferID": "W4",
+                "X_Posi": 0.0,
+                "Y_Posi": 0.0,
+                "NCE_Value": 20.0,
+                "ToolID": "LITHO_C",
+                "ChuckID": "CHK_2",
+                "StageID": "LITHO_M1",
+            },
+            {
+                "WaferID": "W5",
+                "X_Posi": 0.0,
+                "Y_Posi": 0.0,
+                "NCE_Value": 20.0,
+                "ToolID": "LITHO_C",
+                "ChuckID": "CHK_2",
+                "StageID": "LITHO_M1",
+            },
+        ]
+    )
+    hotspots = _hotspots([(0.0, 0.0)])
+    config = AnalysisConfig(noise_filter_majority_threshold=0.5)
+
+    result = MajorityRule().filter(long_df, hotspots, config)
+
+    assert len(result.surviving_hotspots) == 1
+    assert len(result.litho_self_issues) == 0
+
+
 def test_no_majority_survives_to_root_cause_analysis():
     long_df = pd.DataFrame(
         [
