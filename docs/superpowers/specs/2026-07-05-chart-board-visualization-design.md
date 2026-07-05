@@ -1,7 +1,7 @@
 # Chart Board Visualization — Design
 
 Date: 2026-07-05
-Status: Approved (pending user sign-off on written spec)
+Status: Approved
 
 ## 1. Purpose
 
