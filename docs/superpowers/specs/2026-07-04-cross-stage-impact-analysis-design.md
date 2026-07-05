@@ -56,8 +56,8 @@ nce_analysis/
 │   └── majority_rule.py    # default: >50% Tool/Chuck rule + cross-stage contamination check
 ├── root_cause/
 │   ├── base.py             # RootCauseStrategy interface
-│   ├── statistical.py      # Chi-square / Fisher exact test
-│   └── ml.py                # Decision Tree / XGBoost + SHAP
+│   ├── statistical.py      # Chi-square / Fisher exact test, Holm-Bonferroni corrected
+│   └── ml.py                # direct suspect risk-uplift scoring
 ├── drift/
 │   ├── base.py             # DriftStrategy interface
 │   ├── regression_cusum.py
@@ -147,19 +147,29 @@ for each hotspot coordinate:
    fallback takes). Not an error path — a built-in behavior, surfaced as the `fisher_fallback`
    entry in `Metrics`.
 3. If the global test ran and is significant (`p < alpha`, default 0.05) — or the Fisher fallback
-   is active — run one-vs-rest Fisher exact tests per combination; the suspect is the combination
-   with the smallest p-value **and** odds ratio > 1 (elevated, not reduced, anomaly rate). The
-   winning combination must itself satisfy `p < alpha`, otherwise no suspect is reported.
-4. `Confidence_Score = (1 - p_value) * 100`. `Metrics` includes p-values, odds ratio, sample size.
+   is active — run one-vs-rest Fisher exact tests per combination, then apply a Holm-Bonferroni
+   correction across all tested combinations (`num_hypotheses` in `Metrics`) to control the
+   family-wise false-positive rate; the suspect is the combination with the smallest
+   Holm-adjusted p-value **and** odds ratio > 1 (elevated, not reduced, anomaly rate). The winning
+   combination's *adjusted* p-value must satisfy `p_adjusted < alpha`, otherwise no suspect is
+   reported.
+4. `Confidence_Score = (1 - p_value) * 100` (raw, pre-correction p-value; the adjusted p-value only
+   gates eligibility). `Metrics` includes raw and Holm-adjusted p-values, odds ratio, sample size,
+   `num_hypotheses`, `multiple_testing_method`.
 
 ### `ml` strategy
-1. Features: `Pre_ToolID`, `Pre_ChamberID` (categorical). Label: `is_anomaly`.
-2. Train a shallow Decision Tree (interpretability) or XGBoost (when interaction effects matter),
-   compute SHAP values. v1 ships the Decision Tree only; XGBoost is a future strategy variant and
-   not a v1 dependency.
-3. Identify the specific category value with the highest positive SHAP contribution toward
-   `is_anomaly = 1` (not just "ToolID is important" in the abstract).
-4. `Confidence_Score` = normalized contribution share of the top category, scaled to percentage.
+1. Features: `Pre_ToolID`, `Pre_ChamberID` (categorical, combined per `root_cause_granularity` via
+   the shared suspect key). Label: `is_anomaly`.
+2. Compute each suspect key's anomaly rate directly and compare it to the overall anomaly rate
+   across the group — `risk_uplift = suspect_rate - overall_rate`. This replaced a shallow
+   Decision Tree + SHAP explainer: a `max_depth=3` tree can only resolve ~8 leaf regions, which
+   silently mis-attributed the suspect once the number of distinct suspect keys exceeded that, and
+   SHAP could report non-zero (noise) contribution even when no suspect had elevated risk. Direct
+   uplift scoring has no resolution limit and is exactly zero when there's no signal.
+3. Identify the suspect key with the highest positive `risk_uplift` (not just "ToolID is important"
+   in the abstract). If no suspect key has positive uplift, no candidate is reported.
+4. `Confidence_Score` = the winning suspect's uplift as a share of the sum of all positive uplifts,
+   scaled to percentage.
 
 ### `both` (cross-validation)
 Run both strategies independently. If they agree on the same suspect combination, keep the higher
