@@ -1,6 +1,6 @@
 # False Positive Risk Hardening Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Reduce known false-positive and disagreement risks in drift, statistical root-cause, and ML root-cause analysis without expanding v1 scope into `PartID` / product-tool mismatch analysis.
 
@@ -46,7 +46,7 @@
 - Modify: `tests/test_regression_cusum.py`
 - Modify: `nce_analysis/drift/regression_cusum.py`
 
-- [ ] **Step 1: Write the failing pure-noise regression test**
+- [x] **Step 1: Write the failing pure-noise regression test**
 
 Append this test to `tests/test_regression_cusum.py`:
 
@@ -69,7 +69,7 @@ def test_classify_does_not_report_sudden_shift_for_seeded_white_noise():
 
 Also add `import numpy as np` at the top of `tests/test_regression_cusum.py` if it is not already present.
 
-- [ ] **Step 2: Run the focused test and verify it fails**
+- [x] **Step 2: Run the focused test and verify it fails**
 
 Run:
 
@@ -79,7 +79,7 @@ python3.12 -m pytest tests/test_regression_cusum.py::test_classify_does_not_repo
 
 Expected: FAIL because the current fixed threshold `5 * residual_std` reports `CHAMBER_SUDDEN_SHIFT` for this seeded noise series, or because `cusum_threshold_method` is missing.
 
-- [ ] **Step 3: Implement a sample-size-aware CUSUM threshold**
+- [x] **Step 3: Implement a sample-size-aware CUSUM threshold**
 
 In `nce_analysis/drift/regression_cusum.py`, replace:
 
@@ -106,7 +106,7 @@ Add this metric to the existing `metrics` dict:
 
 Meaning of `cusum_threshold_method`: `1.0` means sample-size-aware residual CUSUM threshold. This keeps metrics numeric and compatible with `dict[str, float]`.
 
-- [ ] **Step 4: Run the focused test and verify it passes**
+- [x] **Step 4: Run the focused test and verify it passes**
 
 Run:
 
@@ -116,7 +116,7 @@ python3.12 -m pytest tests/test_regression_cusum.py::test_classify_does_not_repo
 
 Expected: PASS.
 
-- [ ] **Step 5: Verify existing drift behavior still detects a clear sudden shift**
+- [x] **Step 5: Verify existing drift behavior still detects a clear sudden shift**
 
 Run:
 
@@ -126,7 +126,7 @@ python3.12 -m pytest tests/test_regression_cusum.py::test_classify_detects_sudde
 
 Expected: PASS. If it fails, strengthen the existing fixture from `[10.0] * 10 + [30.0] * 10` to `[10.0] * 10 + [50.0] * 10`; the test should represent an unambiguous sudden shift under the stricter threshold.
 
-- [ ] **Step 6: Run all drift tests**
+- [x] **Step 6: Run all drift tests**
 
 Run:
 
@@ -136,7 +136,7 @@ python3.12 -m pytest tests/test_regression_cusum.py -v
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add nce_analysis/drift/regression_cusum.py tests/test_regression_cusum.py
@@ -151,7 +151,7 @@ git commit -m "fix: scale cusum threshold with sample size"
 - Modify: `tests/test_statistical.py`
 - Modify: `nce_analysis/root_cause/statistical.py`
 
-- [ ] **Step 1: Write the failing Holm-Bonferroni rejection test**
+- [x] **Step 1: Write the failing Holm-Bonferroni rejection test**
 
 Append this test to `tests/test_statistical.py`:
 
@@ -178,7 +178,7 @@ def test_analyze_rejects_raw_significant_combo_after_holm_correction():
 
 This fixture has one elevated group with a raw one-vs-rest Fisher p-value below `0.05`, but it is not strong enough to survive Holm correction across 20 suspect tests.
 
-- [ ] **Step 2: Write the strong-signal survival test**
+- [x] **Step 2: Write the strong-signal survival test**
 
 Append this test to `tests/test_statistical.py`:
 
@@ -207,7 +207,7 @@ def test_analyze_keeps_strong_combo_after_holm_correction():
     assert result[0].metrics["multiple_testing_method"] == 1.0
 ```
 
-- [ ] **Step 3: Run the new tests and verify at least one fails**
+- [x] **Step 3: Run the new tests and verify at least one fails**
 
 Run:
 
@@ -217,7 +217,7 @@ python3.12 -m pytest tests/test_statistical.py::test_analyze_rejects_raw_signifi
 
 Expected: FAIL because `StatisticalStrategy` currently accepts raw p-values and does not emit `p_value_combo_adjusted` or `multiple_testing_method`.
 
-- [ ] **Step 4: Implement Holm-Bonferroni correction helper**
+- [x] **Step 4: Implement Holm-Bonferroni correction helper**
 
 Add this helper near the top of `nce_analysis/root_cause/statistical.py`, below imports:
 
@@ -242,7 +242,7 @@ def _holm_bonferroni_adjust(p_values: list[float]) -> list[float]:
     return adjusted_by_original
 ```
 
-- [ ] **Step 5: Use adjusted p-values to select the statistical candidate**
+- [x] **Step 5: Use adjusted p-values to select the statistical candidate**
 
 In `StatisticalStrategy.analyze`, replace the loop that updates `best_p` directly with collection plus adjustment:
 
@@ -303,7 +303,7 @@ Add these metrics:
 
 Keep the existing `"p_value_combo"` as the raw p-value for diagnostics.
 
-- [ ] **Step 6: Run the statistical tests**
+- [x] **Step 6: Run the statistical tests**
 
 Run:
 
@@ -313,7 +313,7 @@ python3.12 -m pytest tests/test_statistical.py -v
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add nce_analysis/root_cause/statistical.py tests/test_statistical.py
@@ -329,7 +329,7 @@ git commit -m "fix: apply holm correction to fisher post hoc tests"
 - Modify: `nce_analysis/root_cause/ml.py`
 - Optional modify: `pyproject.toml`
 
-- [ ] **Step 1: Write the high-cardinality ML test**
+- [x] **Step 1: Write the high-cardinality ML test**
 
 Append this test to `tests/test_ml.py`:
 
@@ -358,7 +358,7 @@ def test_analyze_identifies_best_high_cardinality_combo_without_depth_limit():
     assert result[0].metrics["ml_scoring_method"] == 1.0
 ```
 
-- [ ] **Step 2: Write the no-uplift empty-result test**
+- [x] **Step 2: Write the no-uplift empty-result test**
 
 Append this test to `tests/test_ml.py`:
 
@@ -382,7 +382,7 @@ def test_analyze_returns_empty_when_no_combo_has_positive_risk_uplift():
     assert result == []
 ```
 
-- [ ] **Step 3: Run the new ML tests and verify they fail or expose old metrics**
+- [x] **Step 3: Run the new ML tests and verify they fail or expose old metrics**
 
 Run:
 
@@ -392,7 +392,7 @@ python3.12 -m pytest tests/test_ml.py::test_analyze_identifies_best_high_cardina
 
 Expected: FAIL because the current implementation uses `DecisionTreeClassifier(max_depth=3)` and SHAP metrics instead of direct risk-uplift metrics.
 
-- [ ] **Step 4: Replace `MLStrategy.analyze` implementation**
+- [x] **Step 4: Replace `MLStrategy.analyze` implementation**
 
 In `nce_analysis/root_cause/ml.py`, remove these imports:
 
@@ -452,7 +452,7 @@ return [
 
 This keeps `MLStrategy` deterministic, interpretable, and free of tree-depth resolution limits for the current suspect-key-only feature set.
 
-- [ ] **Step 5: Remove unused dependency only if no imports remain**
+- [x] **Step 5: Remove unused dependency only if no imports remain**
 
 Run:
 
@@ -462,7 +462,7 @@ rg -n "import shap|from shap|shap\\." nce_analysis tests
 
 Expected: no output. If this command has no output, remove `"shap>=0.44"` from `pyproject.toml`. If it finds a remaining legitimate import, do not edit `pyproject.toml`.
 
-- [ ] **Step 6: Run the ML tests**
+- [x] **Step 6: Run the ML tests**
 
 Run:
 
@@ -472,7 +472,7 @@ python3.12 -m pytest tests/test_ml.py -v
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 If `pyproject.toml` changed:
 
@@ -498,7 +498,7 @@ git commit -m "fix: replace suspect-key ml tree with risk uplift scoring"
   - `tests/test_both.py`
   - `tests/test_pipeline_e2e.py`
 
-- [ ] **Step 1: Run compatibility tests**
+- [x] **Step 1: Run compatibility tests**
 
 Run:
 
@@ -508,7 +508,7 @@ python3.12 -m pytest tests/test_both.py tests/test_pipeline_e2e.py -v
 
 Expected: PASS. The public `RootCauseCandidate` contract is unchanged, so no compatibility edit should be required.
 
-- [ ] **Step 2: If `BothStrategy` metric assertions fail, update test expectations only**
+- [x] **Step 2: If `BothStrategy` metric assertions fail, update test expectations only**
 
 If tests expected `"shap_contribution"` in ML metrics, replace that expectation with `"risk_uplift"`.
 
@@ -520,7 +520,7 @@ assert "ml_risk_uplift" in result[0].metrics
 
 Do not change `BothStrategy` behavior unless the failure proves it cannot merge prefixed metrics from the new ML candidate.
 
-- [ ] **Step 3: Run compatibility tests again**
+- [x] **Step 3: Run compatibility tests again**
 
 Run:
 
@@ -530,7 +530,7 @@ python3.12 -m pytest tests/test_both.py tests/test_pipeline_e2e.py -v
 
 Expected: PASS.
 
-- [ ] **Step 4: Commit only if files changed**
+- [x] **Step 4: Commit only if files changed**
 
 If this task changed tests:
 
@@ -548,7 +548,7 @@ If no files changed, skip this commit.
 **Files:**
 - No code changes expected.
 
-- [ ] **Step 1: Run targeted hardened-area tests**
+- [x] **Step 1: Run targeted hardened-area tests**
 
 Run:
 
@@ -558,7 +558,7 @@ python3.12 -m pytest tests/test_regression_cusum.py tests/test_statistical.py te
 
 Expected: PASS.
 
-- [ ] **Step 2: Run full test suite**
+- [x] **Step 2: Run full test suite**
 
 Run:
 
@@ -568,7 +568,7 @@ python3.12 -m pytest tests/ -v
 
 Expected: PASS.
 
-- [ ] **Step 3: Inspect for accidental v1 scope expansion**
+- [x] **Step 3: Inspect for accidental v1 scope expansion**
 
 Run:
 
@@ -582,7 +582,7 @@ Expected:
 - No new `ChuckID` feature usage in `nce_analysis/root_cause/ml.py`.
 - Existing `ChuckID` use outside root-cause noise filtering is acceptable only if it already existed before this plan.
 
-- [ ] **Step 4: Commit any final cleanup**
+- [x] **Step 4: Commit any final cleanup**
 
 If no files changed after Task 4, skip this step. If formatting or dependency cleanup changed files:
 

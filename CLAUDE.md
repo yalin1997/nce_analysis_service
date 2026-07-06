@@ -111,13 +111,21 @@ new `if granularity == "tool"` branch.
 expected cell counts (`scipy.stats.contingency.expected_freq`); if any
 expected count is < 5 the chi-square approximation is skipped in favor of
 per-combination one-vs-rest Fisher exact tests directly (surfaced as the
-`fisher_fallback` metric — a designed fallback, not an error path). The
-winning suspect must have p < alpha *and* odds ratio > 1 (elevated risk, not
-reduced).
+`fisher_fallback` metric — a designed fallback, not an error path). Every
+suspect's Fisher p-value is then Holm-Bonferroni corrected across the number
+of suspects tested (`num_hypotheses`) before selection, since testing many
+suspect keys at once inflates the chance of a spuriously low raw p-value.
+The winning suspect must have Holm-adjusted p < alpha *and* odds ratio > 1
+(elevated risk, not reduced); `Confidence_Score` still uses the raw
+(pre-correction) p-value.
 
-`MLStrategy`: one-hot encode the suspect key, fit a shallow
-`DecisionTreeClassifier`, use SHAP (`shap.TreeExplainer`) to find the suspect
-group with the highest mean positive contribution toward `is_anomaly = 1`.
+`MLStrategy`: score each suspect key directly by `risk_uplift` (its anomaly
+rate minus the overall group anomaly rate) and pick the suspect with the
+highest positive uplift; no suspect has 0 or negative uplift returns no
+candidate. This replaced a one-hot-encoded shallow `DecisionTreeClassifier` +
+SHAP explainer, which had a resolution ceiling (`max_depth=3` degrees to ~8
+leaf regions — not enough to distinguish many suspect keys) and could report
+non-zero SHAP contribution as noise even with no real signal.
 
 `BothStrategy`: runs both; if they agree on the same suspect, keeps the
 higher confidence score; if they disagree (or only one finds a suspect),
@@ -131,10 +139,14 @@ enough history (< 3 rows falls back to `SPECIFIC_CHAMBER_DEFECT` with an
 `RegressionCusum` (default) does linear regression of `NCE_Value` on elapsed
 `Pre_Execute_Time` for slope/significance (`CHAMBER_DRIFT`), plus a CUSUM
 control-chart pass for abrupt change points (`CHAMBER_SUDDEN_SHIFT`);
-otherwise `SPECIFIC_CHAMBER_DEFECT` (static, no time trend). Both drift
-strategies guard against degenerate series (constant timestamps or constant
-values) by returning early with an `insufficient_*_variation` metric rather
-than dividing by zero / producing NaN.
+otherwise `SPECIFIC_CHAMBER_DEFECT` (static, no time trend). The CUSUM
+change-point threshold scales with sample size
+(`3 * residual_std * sqrt(n)`, surfaced as `cusum_threshold_method`) rather
+than a fixed multiple of `residual_std`, since a fixed threshold flags
+short, noisy series as a sudden shift when they're really just noise. Both
+drift strategies guard against degenerate series (constant timestamps or
+constant values) by returning early with an `insufficient_*_variation`
+metric rather than dividing by zero / producing NaN.
 
 ### Error handling boundaries
 
