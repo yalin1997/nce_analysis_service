@@ -1,5 +1,7 @@
 import pandas as pd
 
+from analysis_core import DominanceConfig, find_dominant
+
 from nce_analysis.config import AnalysisConfig
 from nce_analysis.noise_filter.base import NoiseFilterResult, NoiseFilterStrategy
 from nce_analysis.schema import RootCauseDetail
@@ -12,6 +14,7 @@ class MajorityRule(NoiseFilterStrategy):
         litho_points = long_df.drop_duplicates(subset=["WaferID", "X_Posi", "Y_Posi"]).copy()
         litho_points["is_anomaly"] = litho_points["NCE_Value"] > config.spec_threshold
 
+        dominance_config = DominanceConfig(threshold=config.noise_filter_majority_threshold)
         surviving_rows = []
         self_issues: list[RootCauseDetail] = []
 
@@ -22,18 +25,16 @@ class MajorityRule(NoiseFilterStrategy):
                 & litho_points["is_anomaly"]
             )
             anomalous = litho_points[coord_mask]
-            total_anomalous = len(anomalous)
-            if total_anomalous == 0:
+            if len(anomalous) == 0:
                 surviving_rows.append(hotspot)
                 continue
 
-            combo_counts = pd.Series(
-                list(zip(anomalous["ToolID"], anomalous["ChuckID"]))
-            ).value_counts()
-            (owning_tool, top_chuck), chuck_n = combo_counts.index[0], combo_counts.iloc[0]
-            chuck_share = chuck_n / total_anomalous
-
-            if chuck_share > config.noise_filter_majority_threshold:
+            chuck_dominance = find_dominant(
+                pd.Series(list(zip(anomalous["ToolID"], anomalous["ChuckID"]))),
+                dominance_config,
+            )
+            if chuck_dominance is not None:
+                owning_tool, top_chuck = chuck_dominance.category
                 chuck_rows = anomalous[
                     (anomalous["ToolID"] == owning_tool) & (anomalous["ChuckID"] == top_chuck)
                 ]
@@ -46,31 +47,29 @@ class MajorityRule(NoiseFilterStrategy):
                         Suspect_Pre_ToolID=owning_tool,
                         Suspect_Pre_ChamberID=top_chuck,
                         Suspect_Pre_StepID="N/A",
-                        Confidence_Score=chuck_share * 100,
+                        Confidence_Score=chuck_dominance.share * 100,
                         Root_Cause_Type=root_cause_type,
                         Affected_Coordinates=[(hotspot["X_Posi"], hotspot["Y_Posi"])],
                         Metrics={
-                            "chuck_share": chuck_share,
+                            "chuck_share": chuck_dominance.share,
                             "stage_diversity": float(stage_diversity),
                         },
                     )
                 )
                 continue
 
-            tool_counts = anomalous["ToolID"].value_counts()
-            top_tool, tool_n = tool_counts.index[0], tool_counts.iloc[0]
-            tool_share = tool_n / total_anomalous
-
-            if tool_share > config.noise_filter_majority_threshold:
+            tool_dominance = find_dominant(anomalous["ToolID"], dominance_config)
+            if tool_dominance is not None:
+                (top_tool,) = tool_dominance.category
                 self_issues.append(
                     RootCauseDetail(
                         Suspect_Pre_ToolID=top_tool,
                         Suspect_Pre_ChamberID="N/A",
                         Suspect_Pre_StepID="N/A",
-                        Confidence_Score=tool_share * 100,
+                        Confidence_Score=tool_dominance.share * 100,
                         Root_Cause_Type="LITHO_TOOL_ISSUE",
                         Affected_Coordinates=[(hotspot["X_Posi"], hotspot["Y_Posi"])],
-                        Metrics={"tool_share": tool_share},
+                        Metrics={"tool_share": tool_dominance.share},
                     )
                 )
                 continue
