@@ -155,3 +155,8 @@ See `CLAUDE.md` for the test commands, TDD workflow, and internal pipeline
 architecture. Full design rationale (why grouping is dynamic, noise-filter
 thresholds, statistical fallback rules) lives in
 `docs/superpowers/specs/2026-07-04-cross-stage-impact-analysis-design.md`.
+
+Generic, domain-free statistical building blocks (association ranking,
+uplift ranking, trend/change-point detection, dominance, ratio hotspots)
+live in the `analysis_core` package and are reusable outside the NCE
+domain; the `nce_analysis` strategies are thin adapters over them.

@@ -45,8 +45,16 @@ Pipeline of swappable strategy components, each stage an ABC with one
 concrete default, selected per-call via a single `AnalysisConfig`:
 
 ```
-nce_analysis/
-├── preprocessing/wide_history_reshape.py   # WideHistoryReshape (default)
+analysis_core/           # domain-free algorithm layer (no nce_analysis imports — enforced by test)
+├── stats.py             # holm_bonferroni_adjust
+├── association.py       # ChiSquareFisherRanker: chi²-gated Fisher one-vs-rest + Holm
+├── uplift.py            # RiskUpliftRanker: event-rate uplift ranking
+├── trend.py             # RegressionCusumDetector / CorrelationTrendDetector
+├── dominance.py         # find_dominant: majority-share category detection
+└── ratio_hotspot.py     # RatioHotspotDetector: grouped event-ratio thresholding
+
+nce_analysis/            # domain layer: thin adapters over analysis_core
+├── preprocessing/wide_history_reshape.py   # WideHistoryReshape (default; not extracted)
 ├── hotspot/ratio_threshold.py              # RatioThreshold (default)
 ├── noise_filter/majority_rule.py           # MajorityRule (default)
 ├── root_cause/{statistical,ml,both}.py     # StatisticalStrategy / MLStrategy / BothStrategy
@@ -56,6 +64,16 @@ nce_analysis/
 ├── schema.py           # pydantic input/output models (RootCauseDetail, AnalysisResult, ...)
 └── result.py            # aggregate_results: Details -> deduped/sorted Summary
 ```
+
+Each `nce_analysis` strategy is a thin adapter: it maps domain columns onto
+an `analysis_core` component's neutral column contract (via that
+component's pydantic config), runs it, and converts the neutral result back
+to domain labels (e.g. `TrendResult.kind` → `CHAMBER_DRIFT`) and the
+existing metric keys. `analysis_core` must never import `nce_analysis` or
+use domain vocabulary — `tests/analysis_core/test_dependency_direction.py`
+enforces this. Algorithm changes belong in `analysis_core`; label/metric
+naming and domain thresholds belong in the adapters. Design:
+`docs/superpowers/specs/2026-07-08-analysis-core-extraction-design.md`.
 
 Data flow (`pipeline.run`): `Preprocessing → HotspotDetection → NoiseFilter →
 [per surviving hotspot coordinate] → RootCauseAnalysis (per (Pre_StageID,
