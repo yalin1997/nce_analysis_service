@@ -16,3 +16,10 @@ class DriftStrategy(ABC):
         affected coordinate. Returns
         (root_cause_type, metrics) where root_cause_type is one of
         'SPECIFIC_CHAMBER_DEFECT', 'CHAMBER_DRIFT', 'CHAMBER_SUDDEN_SHIFT'."""
+
+
+KIND_TO_ROOT_CAUSE = {
+    "change_point": "CHAMBER_SUDDEN_SHIFT",
+    "increasing_trend": "CHAMBER_DRIFT",
+    "none": "SPECIFIC_CHAMBER_DEFECT",
+}
