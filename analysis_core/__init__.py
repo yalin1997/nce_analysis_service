@@ -3,6 +3,7 @@ from analysis_core.association import (
     ChiSquareFisherRanker,
     GroupAssociation,
 )
+from analysis_core.ratio_hotspot import RatioHotspotConfig, RatioHotspotDetector
 from analysis_core.stats import holm_bonferroni_adjust
 from analysis_core.trend import (
     CorrelationTrendDetector,
@@ -19,6 +20,8 @@ __all__ = [
     "CorrelationTrendDetector",
     "GroupAssociation",
     "GroupUplift",
+    "RatioHotspotConfig",
+    "RatioHotspotDetector",
     "RegressionCusumDetector",
     "RiskUpliftRanker",
     "TrendConfig",

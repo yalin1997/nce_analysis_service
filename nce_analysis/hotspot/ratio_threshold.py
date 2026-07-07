@@ -1,5 +1,7 @@
 import pandas as pd
 
+from analysis_core import RatioHotspotConfig, RatioHotspotDetector
+
 from nce_analysis.config import AnalysisConfig
 from nce_analysis.hotspot.base import HotspotStrategy
 
@@ -11,23 +13,19 @@ class RatioThreshold(HotspotStrategy):
         litho_points = long_df.drop_duplicates(subset=LITHO_POINT_KEY_COLUMNS).copy()
         litho_points["is_anomaly"] = litho_points["NCE_Value"] > config.spec_threshold
 
-        grouped = (
-            litho_points.groupby(["X_Posi", "Y_Posi"])
-            .agg(
-                anomalous_wafer_count=("is_anomaly", "sum"),
-                total_wafer_count=("is_anomaly", "count"),
+        detected = RatioHotspotDetector(
+            RatioHotspotConfig(
+                group_cols=["X_Posi", "Y_Posi"],
+                event_col="is_anomaly",
+                ratio_threshold=config.hotspot_ratio_threshold,
+                min_count=config.min_wafer_count,
             )
-            .reset_index()
-        )
-        grouped["anomaly_ratio"] = (
-            grouped["anomalous_wafer_count"] / grouped["total_wafer_count"]
-        )
+        ).detect(litho_points)
 
-        grouped = grouped[grouped["anomaly_ratio"] >= config.hotspot_ratio_threshold]
-        grouped["insufficient_sample"] = (
-            grouped["total_wafer_count"] < config.min_wafer_count
+        return detected.rename(
+            columns={
+                "event_count": "anomalous_wafer_count",
+                "total_count": "total_wafer_count",
+                "event_ratio": "anomaly_ratio",
+            }
         )
-
-        return grouped.sort_values(
-            ["anomaly_ratio", "anomalous_wafer_count"], ascending=False
-        ).reset_index(drop=True)
